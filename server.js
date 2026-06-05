@@ -45,6 +45,45 @@ function toPositiveInteger(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function clampInteger(value, fallback, min, max) {
+  return Math.max(min, Math.min(max, toPositiveInteger(value, fallback)));
+}
+
+function uniqueBy(items, getKey) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = normalizeText(getKey(item));
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function compactUnique(values) {
+  return uniqueBy(
+    values
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+    (value) => value
+  );
+}
+
+function buildLocalQueries({ businessName, keyword, category }) {
+  const keywordQuery =
+    category && !containsNeedle(keyword, category)
+      ? `${keyword} ${category}`.trim()
+      : keyword;
+
+  return compactUnique([
+    keywordQuery,
+    keyword,
+    `${businessName} ${keyword}`,
+    `${businessName} ${keywordQuery}`,
+    `${businessName} ${category}`,
+    businessName
+  ]);
+}
+
 async function fetchNaverJson(url, params) {
   if (!NAVER_CLIENT_ID || !NAVER_CLIENT_SECRET) {
     const error = new Error(
@@ -84,9 +123,13 @@ async function fetchNaverJson(url, params) {
   return data;
 }
 
-function mapLocalResults(items = []) {
+function mapLocalResults(items = [], options = {}) {
   return items.map((item, index) => ({
     rank: index + 1,
+    rankLabel: String(index + 1),
+    searchQuery: options.searchQuery || "",
+    searchType: options.searchType || "keyword",
+    matchNote: options.matchNote || "",
     title: stripHtml(item.title),
     category: stripHtml(item.category),
     address: stripHtml(item.address),
@@ -112,6 +155,63 @@ function mapBlogResults(items = []) {
 function findPlaceRank(localResults, businessName) {
   const match = localResults.find((item) => containsNeedle(item.title, businessName));
   return match ? match.rank : null;
+}
+
+async function analyzeLocalResults({ businessName, keyword, category, localDisplay }) {
+  const queries = buildLocalQueries({ businessName, keyword, category });
+  const display = clampInteger(localDisplay, 5, 1, 5);
+
+  const searches = await Promise.all(
+    queries.map(async (query, index) => {
+      const searchType = index <= 1 ? "keyword" : "business";
+      const data = await fetchNaverJson(NAVER_LOCAL_URL, {
+        query,
+        display,
+        start: 1,
+        sort: "random"
+      });
+
+      return {
+        query,
+        searchType,
+        results: mapLocalResults(data.items, { searchQuery: query, searchType })
+      };
+    })
+  );
+
+  const keywordResults = searches
+    .filter((search) => search.searchType === "keyword")
+    .flatMap((search) => search.results);
+  const businessResults = searches
+    .filter((search) => search.searchType === "business")
+    .flatMap((search) => search.results);
+
+  const dedupedKeywordResults = uniqueBy(
+    keywordResults,
+    (item) => `${item.title} ${item.roadAddress || item.address}`
+  ).slice(0, 5);
+  const placeRank = findPlaceRank(dedupedKeywordResults, businessName);
+  const businessMatch =
+    dedupedKeywordResults.find((item) => containsNeedle(item.title, businessName)) ||
+    businessResults.find((item) => containsNeedle(item.title, businessName));
+
+  const localResults = [...dedupedKeywordResults];
+  if (businessMatch && !placeRank) {
+    localResults.unshift({
+      ...businessMatch,
+      rank: null,
+      rankLabel: "업체",
+      matchNote: "업체명 검색으로 확인됨. 단, 현재 키워드 지역검색 공식 API 5위권에는 없습니다."
+    });
+  }
+
+  return {
+    placeRank,
+    placeRankLabel: placeRank ? `${placeRank}위` : businessMatch ? "5위권밖" : "미노출",
+    placeFoundByName: Boolean(businessMatch),
+    localResults: localResults.slice(0, 6),
+    localSearchQueries: queries
+  };
 }
 
 function findBlogRank(blogResults, businessName, keyword) {
@@ -220,11 +320,11 @@ function rankScore(rank, maxScore) {
   return Math.round(maxScore * 0.25);
 }
 
-function calculateTotalScore({ placeRank, blogRank, blogScore }) {
+function calculateTotalScore({ placeRank, blogRank, blogScore, placeFoundByName }) {
   const placeComponent = rankScore(placeRank, 30);
   const blogRankComponent = rankScore(blogRank, 25);
   const blogQualityComponent = Math.round(blogScore * 0.35);
-  const exposureComponent = placeRank ? 10 : 0;
+  const exposureComponent = placeRank ? 10 : placeFoundByName ? 4 : 0;
 
   return Math.min(
     100,
@@ -232,12 +332,25 @@ function calculateTotalScore({ placeRank, blogRank, blogScore }) {
   );
 }
 
-function createActions({ placeRank, blogRank, blogScore, businessName, keyword, category }) {
+function createActions({
+  placeRank,
+  blogRank,
+  blogScore,
+  businessName,
+  keyword,
+  category,
+  placeFoundByName
+}) {
   const actions = [];
 
   if (!placeRank) {
-    actions.push(`${keyword} 지역 검색 결과에 ${businessName} 노출을 먼저 확보하세요.`);
-    actions.push("스마트플레이스 업체명, 카테고리, 주소, 대표 키워드 일치도를 점검하세요.");
+    if (placeFoundByName) {
+      actions.push(`${businessName} 업체 정보는 확인됐지만 ${keyword} 공식 지역검색 5위권에는 없습니다.`);
+      actions.push("네이버 공식 지역검색 API는 최대 5개 결과만 제공하므로, 5위권 진입 여부를 중심으로 관리하세요.");
+    } else {
+      actions.push(`${keyword} 지역 검색과 업체명 검색 모두에서 ${businessName} 노출을 먼저 확인하세요.`);
+      actions.push("스마트플레이스 업체명, 카테고리, 주소, 대표 키워드 일치도를 점검하세요.");
+    }
   } else if (placeRank > 5) {
     actions.push(`현재 플레이스 ${placeRank}위입니다. 상위 5개 업체의 제목, 카테고리, 리뷰 문맥을 비교하세요.`);
   } else {
@@ -259,14 +372,22 @@ function createActions({ placeRank, blogRank, blogScore, businessName, keyword, 
   return actions.slice(0, 5);
 }
 
-function createPrompt({ businessName, keyword, category, blogScore, placeRank, blogRank }) {
+function createPrompt({
+  businessName,
+  keyword,
+  category,
+  blogScore,
+  placeRank,
+  blogRank,
+  placeRankLabel
+}) {
   return [
     `너는 네이버 플레이스와 블로그 검색 최적화에 강한 ${category || "로컬 비즈니스"} 콘텐츠 전략가다.`,
     "",
     `업체명: ${businessName}`,
     `핵심 키워드: ${keyword}`,
     `업종: ${category || "미입력"}`,
-    `현재 플레이스 순위: ${placeRank ? `${placeRank}위` : "미노출"}`,
+    `현재 플레이스 순위: ${placeRank ? `${placeRank}위` : placeRankLabel || "미노출"}`,
     `현재 블로그 순위: ${blogRank ? `${blogRank}위` : "미노출"}`,
     `현재 블로그 글 품질 점수: ${blogScore}점`,
     "",
@@ -308,15 +429,14 @@ app.post("/api/analyze", async (req, res, next) => {
       });
     }
 
-    const localQuery = [keyword, category].filter(Boolean).join(" ");
     const blogQuery = [businessName, keyword].filter(Boolean).join(" ");
 
-    const [localData, blogData] = await Promise.all([
-      fetchNaverJson(NAVER_LOCAL_URL, {
-        query: localQuery,
-        display: toPositiveInteger(req.query.localDisplay, 10),
-        start: 1,
-        sort: "random"
+    const [localAnalysis, blogData] = await Promise.all([
+      analyzeLocalResults({
+        businessName,
+        keyword,
+        category,
+        localDisplay: req.query.localDisplay
       }),
       fetchNaverJson(NAVER_BLOG_URL, {
         query: blogQuery,
@@ -326,24 +446,34 @@ app.post("/api/analyze", async (req, res, next) => {
       })
     ]);
 
-    const localResults = mapLocalResults(localData.items);
+    const localResults = localAnalysis.localResults;
     const blogResults = mapBlogResults(blogData.items);
-    const placeRank = findPlaceRank(localResults, businessName);
+    const placeRank = localAnalysis.placeRank;
     const blogRank = findBlogRank(blogResults, businessName, keyword);
     const blogAnalysis = calculateBlogScore({ blogText, keyword, category });
     const blogScore = blogAnalysis.score;
-    const totalScore = calculateTotalScore({ placeRank, blogRank, blogScore });
+    const totalScore = calculateTotalScore({
+      placeRank,
+      blogRank,
+      blogScore,
+      placeFoundByName: localAnalysis.placeFoundByName
+    });
     const actions = createActions({
       placeRank,
       blogRank,
       blogScore,
       businessName,
       keyword,
-      category
+      category,
+      placeFoundByName: localAnalysis.placeFoundByName
     });
     const badges = [
       ...(blogAnalysis.score >= 80 ? ["블로그 품질 우수"] : []),
-      ...(placeRank ? ["플레이스 노출 확인"] : ["플레이스 미노출"]),
+      ...(placeRank
+        ? ["플레이스 키워드 5위권 노출"]
+        : localAnalysis.placeFoundByName
+          ? ["업체명 검색 확인", "키워드 5위권 밖"]
+          : ["플레이스 미노출"]),
       ...(blogRank ? ["블로그 검색 노출 확인"] : ["블로그 미노출"]),
       ...(blogAnalysis.checks.first350Keyword ? ["초반 키워드 배치"] : []),
       ...(blogAnalysis.checks.enoughLength ? ["충분한 본문 길이"] : [])
@@ -352,10 +482,13 @@ app.post("/api/analyze", async (req, res, next) => {
     res.json({
       totalScore,
       placeRank,
+      placeRankLabel: localAnalysis.placeRankLabel,
+      placeFoundByName: localAnalysis.placeFoundByName,
       blogRank,
       blogScore,
       badges,
       localResults,
+      localSearchQueries: localAnalysis.localSearchQueries,
       blogResults,
       actions,
       prompt: createPrompt({
@@ -364,7 +497,8 @@ app.post("/api/analyze", async (req, res, next) => {
         category,
         blogScore,
         placeRank,
-        blogRank
+        blogRank,
+        placeRankLabel: localAnalysis.placeRankLabel
       })
     });
   } catch (error) {
