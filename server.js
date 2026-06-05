@@ -5,12 +5,18 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const NAVER_CLIENT_ID = process.env.NAVER_CLIENT_ID;
 const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 const NAVER_LOCAL_URL = "https://openapi.naver.com/v1/search/local.json";
 const NAVER_BLOG_URL = "https://openapi.naver.com/v1/search/blog.json";
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const NAVER_CACHE_TTL_MS = 10 * 60 * 1000;
+const NAVER_REQUEST_DELAY_MS = 180;
+const naverCache = new Map();
 
 function stripHtml(value = "") {
   return String(value)
@@ -45,6 +51,10 @@ function toPositiveInteger(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function clampInteger(value, fallback, min, max) {
   return Math.max(min, Math.min(max, toPositiveInteger(value, fallback)));
 }
@@ -66,6 +76,53 @@ function compactUnique(values) {
       .filter(Boolean),
     (value) => value
   );
+}
+
+function fixCommonKeywordTypos(value = "") {
+  return String(value)
+    .replace(/동핼/g, "동해")
+    .replace(/헬스쟝/g, "헬스장")
+    .trim();
+}
+
+function splitParenthesizedInput(value = "") {
+  const text = String(value || "").trim();
+  const match = text.match(/^(.+?)\s*[\(（]\s*([^)）]+)\s*[\)）]\s*$/);
+  if (!match) return { main: text, detail: "" };
+  return {
+    main: match[1].trim(),
+    detail: match[2].trim()
+  };
+}
+
+function normalizeAnalyzeInput({ businessName, keyword, category }) {
+  const rawBusinessName = String(businessName || "").trim();
+  const rawKeyword = String(keyword || "").trim();
+  const rawCategory = String(category || "").trim();
+  const businessParts = splitParenthesizedInput(rawBusinessName);
+  const keywordParts = splitParenthesizedInput(rawKeyword);
+
+  let cleanBusinessName = businessParts.main || rawBusinessName;
+  let cleanKeyword = rawKeyword;
+
+  if (businessParts.detail) {
+    cleanKeyword = businessParts.detail;
+  } else if (keywordParts.detail) {
+    cleanKeyword = keywordParts.detail;
+    if (!cleanBusinessName && keywordParts.main) {
+      cleanBusinessName = keywordParts.main;
+    }
+  }
+
+  return {
+    businessName: cleanBusinessName.trim(),
+    keyword: fixCommonKeywordTypos(cleanKeyword),
+    category: rawCategory || "헬스장",
+    rawBusinessName,
+    rawKeyword,
+    rawCategory,
+    separated: Boolean(businessParts.detail || keywordParts.detail)
+  };
 }
 
 const GANGWON_REGIONS = [
@@ -196,17 +253,19 @@ function buildKeywordVariants({ keyword, category }) {
 
 function buildLocalQueries({ businessName, keyword, category }) {
   const keywordVariants = buildKeywordVariants({ keyword, category });
-  const businessQueries = keywordVariants.flatMap((query) => [
+  const keywordLimit = isGangwonWideKeyword(keyword) ? 10 : 8;
+  const selectedKeywords = keywordVariants.slice(0, keywordLimit);
+  const businessQueries = selectedKeywords.slice(0, 4).flatMap((query) => [
     `${businessName} ${query}`,
     `${query} ${businessName}`
   ]);
 
   return compactUnique([
-    ...keywordVariants,
+    ...selectedKeywords,
     ...businessQueries,
     `${businessName} ${category}`,
     businessName
-  ]).slice(0, 40);
+  ]).slice(0, isGangwonWideKeyword(keyword) ? 16 : 12);
 }
 
 async function fetchNaverJson(url, params) {
@@ -223,29 +282,49 @@ async function fetchNaverJson(url, params) {
     requestUrl.searchParams.set(key, value);
   });
 
-  const response = await fetch(requestUrl, {
-    headers: {
-      "X-Naver-Client-Id": NAVER_CLIENT_ID,
-      "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+  const cacheKey = requestUrl.toString();
+  const cached = naverCache.get(cacheKey);
+  if (cached && Date.now() - cached.savedAt < NAVER_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(NAVER_REQUEST_DELAY_MS * (attempt + 2));
     }
-  });
 
-  const body = await response.text();
-  let data;
-  try {
-    data = JSON.parse(body);
-  } catch (error) {
-    data = { message: body };
+    const response = await fetch(requestUrl, {
+      headers: {
+        "X-Naver-Client-Id": NAVER_CLIENT_ID,
+        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+      }
+    });
+
+    const body = await response.text();
+    let data;
+    try {
+      data = JSON.parse(body);
+    } catch (error) {
+      data = { message: body };
+    }
+
+    if (response.ok) {
+      naverCache.set(cacheKey, { data, savedAt: Date.now() });
+      return data;
+    }
+
+    lastError = new Error(data.errorMessage || data.message || "네이버 API 호출 실패");
+    lastError.status = response.status;
+    lastError.details = data;
+
+    const rateLimited =
+      response.status === 429 ||
+      String(data.errorMessage || data.message || "").toLowerCase().includes("rate limit");
+    if (!rateLimited) break;
   }
 
-  if (!response.ok) {
-    const error = new Error(data.errorMessage || data.message || "네이버 API 호출 실패");
-    error.status = response.status;
-    error.details = data;
-    throw error;
-  }
-
-  return data;
+  throw lastError;
 }
 
 function mapLocalResults(items = [], options = {}) {
@@ -288,23 +367,24 @@ async function analyzeLocalResults({ businessName, keyword, category, localDispl
   const queries = buildLocalQueries({ businessName, keyword, category });
   const display = clampInteger(localDisplay, 5, 1, 5);
 
-  const searches = await Promise.all(
-    queries.map(async (query) => {
-      const searchType = containsNeedle(query, businessName) ? "business" : "keyword";
-      const data = await fetchNaverJson(NAVER_LOCAL_URL, {
-        query,
-        display,
-        start: 1,
-        sort: "random"
-      });
+  const searches = [];
+  for (const query of queries) {
+    const searchType = containsNeedle(query, businessName) ? "business" : "keyword";
+    const data = await fetchNaverJson(NAVER_LOCAL_URL, {
+      query,
+      display,
+      start: 1,
+      sort: "random"
+    });
 
-      return {
-        query,
-        searchType,
-        results: mapLocalResults(data.items, { searchQuery: query, searchType })
-      };
-    })
-  );
+    searches.push({
+      query,
+      searchType,
+      results: mapLocalResults(data.items, { searchQuery: query, searchType })
+    });
+
+    await sleep(NAVER_REQUEST_DELAY_MS);
+  }
 
   const keywordResults = searches
     .filter((search) => search.searchType === "keyword")
@@ -350,28 +430,28 @@ function findBlogRank(blogResults, businessName, keyword) {
 }
 
 async function analyzeBlogResults({ businessName, keyword, category, blogDisplay }) {
-  const keywordVariants = buildKeywordVariants({ keyword, category }).slice(0, 6);
+  const keywordVariants = buildKeywordVariants({ keyword, category }).slice(0, 5);
   const queries = compactUnique([
     `${businessName} ${keyword}`,
     `${businessName} ${keywordVariants[0] || keyword}`,
     ...keywordVariants,
     `${keyword} 후기`,
     `${keyword} 추천`
-  ]).slice(0, 8);
+  ]).slice(0, 6);
   const display = clampInteger(blogDisplay, 10, 1, 20);
 
-  const searches = await Promise.all(
-    queries.map(async (query) => {
-      const data = await fetchNaverJson(NAVER_BLOG_URL, {
-        query,
-        display,
-        start: 1,
-        sort: "sim"
-      });
+  const searches = [];
+  for (const query of queries) {
+    const data = await fetchNaverJson(NAVER_BLOG_URL, {
+      query,
+      display,
+      start: 1,
+      sort: "sim"
+    });
 
-      return mapBlogResults(data.items, { searchQuery: query });
-    })
-  );
+    searches.push(mapBlogResults(data.items, { searchQuery: query }));
+    await sleep(NAVER_REQUEST_DELAY_MS);
+  }
 
   return {
     blogResults: uniqueBy(searches.flat(), (item) => item.link || item.title).slice(0, 10),
@@ -465,6 +545,64 @@ function calculateBlogScore({ blogText, keyword, category }) {
     score: Math.max(0, Math.min(100, Math.round(score))),
     checks,
     title
+  };
+}
+
+function calculateTopBlogScore({ blogResults, keyword, category }) {
+  const topBlog = Array.isArray(blogResults) && blogResults.length ? blogResults[0] : null;
+  const topFive = Array.isArray(blogResults) ? blogResults.slice(0, 5) : [];
+  const topOneText = topBlog
+    ? `${topBlog.title} ${topBlog.description} ${topBlog.bloggerName}`
+    : "";
+  const topFiveText = topFive
+    .map((item) => `${item.title} ${item.description} ${item.bloggerName}`)
+    .join("\n");
+  const articleWords = [
+    "후기",
+    "추천",
+    "가격",
+    "시설",
+    "위치",
+    "리뷰",
+    "초보",
+    "다이어트",
+    "운동",
+    "PT",
+    "피티",
+    category
+  ].filter(Boolean);
+  const structureWords = ["장점", "이유", "비교", "체크", "방문", "상담"];
+  const visitWords = ["네이버", "스마트플레이스", "지도"];
+
+  let score = 0;
+  const checks = {
+    topBlogExists: Boolean(topBlog),
+    topTitleKeyword: topBlog ? containsNeedle(topBlog.title, keyword) : false,
+    topDescriptionKeyword: topBlog ? containsNeedle(topBlog.description, keyword) : false,
+    topFiveKeyword: containsNeedle(topFiveText, keyword),
+    categoryKeyword: category ? containsNeedle(topFiveText, category) : false,
+    articleWordCount: countIncludedWords(topFiveText, articleWords),
+    structureWordCount: countIncludedWords(topFiveText, structureWords),
+    visitWordCount: countIncludedWords(topFiveText, visitWords),
+    richTopBlogContext: topFive.length >= 5
+  };
+
+  if (checks.topBlogExists) score += 10;
+  if (checks.topTitleKeyword) score += 20;
+  else if (checks.topFiveKeyword) score += 10;
+  if (checks.topDescriptionKeyword) score += 15;
+  if (checks.categoryKeyword) score += 5;
+
+  score += Math.min(20, checks.articleWordCount * 3);
+  score += Math.min(15, checks.structureWordCount * 3);
+  score += Math.min(10, checks.visitWordCount * 5);
+  if (checks.richTopBlogContext) score += 5;
+
+  return {
+    score: Math.max(0, Math.min(100, Math.round(score))),
+    checks,
+    title: topBlog ? topBlog.title : "",
+    description: topBlog ? topBlog.description : ""
   };
 }
 
@@ -565,6 +703,116 @@ function createPrompt({
   ].join("\n");
 }
 
+function extractOpenAIText(data) {
+  if (typeof data?.output_text === "string" && data.output_text.trim()) {
+    return data.output_text.trim();
+  }
+
+  const output = Array.isArray(data?.output) ? data.output : [];
+  const parts = [];
+  output.forEach((item) => {
+    const content = Array.isArray(item.content) ? item.content : [];
+    content.forEach((contentItem) => {
+      if (typeof contentItem.text === "string") {
+        parts.push(contentItem.text);
+      }
+    });
+  });
+
+  return parts.join("\n").trim();
+}
+
+async function createOpenAIBlogDraft({
+  businessName,
+  keyword,
+  category,
+  blogResults,
+  localResults,
+  blogScore,
+  placeRankLabel,
+  blogRank,
+  normalizedInput
+}) {
+  if (!OPENAI_API_KEY) return null;
+
+  const topBlogs = blogResults.slice(0, 5).map((item) => ({
+    rank: item.rank,
+    title: item.title,
+    description: item.description,
+    bloggerName: item.bloggerName,
+    postdate: item.postdate
+  }));
+  const competitors = localResults.slice(0, 5).map((item) => ({
+    rank: item.rankLabel || item.rank,
+    title: item.title,
+    category: item.category,
+    address: item.roadAddress || item.address,
+    searchQuery: item.searchQuery
+  }));
+
+  const input = {
+    businessName,
+    keyword,
+    category,
+    placeRank: placeRankLabel || "미노출",
+    blogRank: blogRank ? `${blogRank}위` : "미노출",
+    topBlogSignalScore: blogScore,
+    normalizedInput,
+    topBlogs,
+    competitors
+  };
+
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      instructions: [
+        "너는 네이버 블로그 상위노출을 목표로 로컬 비즈니스 글을 설계하는 한국어 콘텐츠 전략가다.",
+        "네이버 공식 1등 보장처럼 단정하지 말고, 공식 검색 API에서 확인된 상위 글의 문맥을 참고한 공략 초안이라고 표현한다.",
+        "상위 블로그의 문장을 복사하지 말고 제목 구조, 정보 순서, 방문 의도, 지역 키워드 문맥만 참고한다.",
+        "글은 실제 방문 후기처럼 자연스럽게 쓰고 과장 광고, 허위 후기, 순위 보장 표현은 피한다.",
+        "업체명과 키워드는 사용자가 입력한 값만 기준으로 삼는다. 다른 지역이나 이전 기본값을 섞지 않는다."
+      ].join("\n"),
+      input: [
+        "아래 JSON 데이터를 바탕으로 블로그 초안을 작성해줘.",
+        "",
+        JSON.stringify(input, null, 2),
+        "",
+        "출력 형식:",
+        "1. 추천 블로그 제목 7개",
+        "2. 상위 블로그에서 발견한 공략 포인트 요약",
+        "3. 3000자 이상 블로그 본문 초안",
+        "4. 네이버 지도/스마트플레이스 방문 유도 문장 5개",
+        "5. 발행 전 체크리스트"
+      ].join("\n"),
+      max_output_tokens: 6000
+    })
+  });
+
+  const body = await response.text();
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch (error) {
+    data = { error: { message: body } };
+  }
+
+  if (!response.ok) {
+    const error = new Error(
+      data.error?.message || data.message || "OpenAI 블로그 초안 생성에 실패했습니다."
+    );
+    error.status = response.status;
+    error.details = data;
+    throw error;
+  }
+
+  return extractOpenAIText(data);
+}
+
 function createBlogDraft({
   businessName,
   keyword,
@@ -631,7 +879,7 @@ function createBlogDraft({
     "현재 분석 상태",
     `- 플레이스: ${placeRankLabel || "미노출"}`,
     `- 블로그: ${blogRank ? `${blogRank}위` : "미노출"}`,
-    `- 기존 본문 점수: ${blogScore}점`,
+    `- 상위 블로그 문맥 점수: ${blogScore}점`,
     "",
     "사용 팁",
     "- 실제 사진 5장 이상을 넣어주세요.",
@@ -651,10 +899,12 @@ app.get("/", (req, res) => {
 
 app.post("/api/analyze", async (req, res, next) => {
   try {
-    const businessName = String(req.body.businessName || "").trim();
-    const keyword = String(req.body.keyword || "").trim();
-    const category = String(req.body.category || "").trim();
-    const blogText = String(req.body.blogText || "").trim();
+    const normalizedInput = normalizeAnalyzeInput({
+      businessName: req.body.businessName,
+      keyword: req.body.keyword,
+      category: req.body.category
+    });
+    const { businessName, keyword, category } = normalizedInput;
 
     if (!businessName || !keyword) {
       return res.status(400).json({
@@ -662,26 +912,24 @@ app.post("/api/analyze", async (req, res, next) => {
       });
     }
 
-    const [localAnalysis, blogAnalysisResults] = await Promise.all([
-      analyzeLocalResults({
-        businessName,
-        keyword,
-        category,
-        localDisplay: req.query.localDisplay
-      }),
-      analyzeBlogResults({
-        businessName,
-        keyword,
-        category,
-        blogDisplay: req.query.blogDisplay
-      })
-    ]);
+    const localAnalysis = await analyzeLocalResults({
+      businessName,
+      keyword,
+      category,
+      localDisplay: req.query.localDisplay
+    });
+    const blogAnalysisResults = await analyzeBlogResults({
+      businessName,
+      keyword,
+      category,
+      blogDisplay: req.query.blogDisplay
+    });
 
     const localResults = localAnalysis.localResults;
     const blogResults = blogAnalysisResults.blogResults;
     const placeRank = localAnalysis.placeRank;
     const blogRank = findBlogRank(blogResults, businessName, keyword);
-    const blogAnalysis = calculateBlogScore({ blogText, keyword, category });
+    const blogAnalysis = calculateTopBlogScore({ blogResults, keyword, category });
     const blogScore = blogAnalysis.score;
     const totalScore = calculateTotalScore({
       placeRank,
@@ -699,16 +947,59 @@ app.post("/api/analyze", async (req, res, next) => {
       placeFoundByName: localAnalysis.placeFoundByName
     });
     const badges = [
-      ...(blogAnalysis.score >= 80 ? ["블로그 품질 우수"] : []),
+      ...(blogAnalysis.score >= 80 ? ["상위 블로그 문맥 우수"] : []),
       ...(placeRank
         ? ["플레이스 키워드 5위권 노출"]
         : localAnalysis.placeFoundByName
           ? ["업체명 검색 확인", "키워드 5위권 밖"]
           : ["플레이스 미노출"]),
       ...(blogRank ? ["블로그 검색 노출 확인"] : ["블로그 미노출"]),
-      ...(blogAnalysis.checks.first350Keyword ? ["초반 키워드 배치"] : []),
-      ...(blogAnalysis.checks.enoughLength ? ["충분한 본문 길이"] : [])
+      ...(blogAnalysis.checks.topTitleKeyword ? ["1위권 제목 키워드 확인"] : []),
+      ...(blogAnalysis.checks.richTopBlogContext ? ["상위 블로그 5개 분석"] : [])
     ];
+    const prompt = createPrompt({
+      businessName,
+      keyword,
+      category,
+      blogScore,
+      placeRank,
+      blogRank,
+      placeRankLabel: localAnalysis.placeRankLabel
+    });
+    let draft = createBlogDraft({
+      businessName,
+      keyword,
+      category,
+      blogResults,
+      localResults,
+      blogScore,
+      placeRankLabel: localAnalysis.placeRankLabel,
+      blogRank
+    });
+    let draftSource = OPENAI_API_KEY ? "openai-fallback" : "built-in";
+
+    if (OPENAI_API_KEY) {
+      try {
+        const openAIDraft = await createOpenAIBlogDraft({
+          businessName,
+          keyword,
+          category,
+          blogResults,
+          localResults,
+          blogScore,
+          placeRankLabel: localAnalysis.placeRankLabel,
+          blogRank,
+          normalizedInput
+        });
+
+        if (openAIDraft) {
+          draft = openAIDraft;
+          draftSource = "openai";
+        }
+      } catch (error) {
+        console.error("OpenAI draft generation failed:", error.message);
+      }
+    }
 
     res.json({
       totalScore,
@@ -723,25 +1014,15 @@ app.post("/api/analyze", async (req, res, next) => {
       blogResults,
       blogSearchQueries: blogAnalysisResults.blogSearchQueries,
       actions,
-      draft: createBlogDraft({
-        businessName,
-        keyword,
-        category,
-        blogResults,
-        localResults,
-        blogScore,
-        placeRankLabel: localAnalysis.placeRankLabel,
-        blogRank
-      }),
-      prompt: createPrompt({
-        businessName,
-        keyword,
-        category,
-        blogScore,
-        placeRank,
-        blogRank,
-        placeRankLabel: localAnalysis.placeRankLabel
-      })
+      draft,
+      draftSource,
+      normalizedInput,
+      topBlogAnalysis: {
+        title: blogAnalysis.title,
+        description: blogAnalysis.description,
+        checks: blogAnalysis.checks
+      },
+      prompt
     });
   } catch (error) {
     next(error);
@@ -750,8 +1031,14 @@ app.post("/api/analyze", async (req, res, next) => {
 
 app.use((error, req, res, next) => {
   console.error(error);
+  const isRateLimit =
+    error.status === 429 ||
+    String(error.message || "").toLowerCase().includes("rate limit");
+
   res.status(error.status || 500).json({
-    message: error.message || "서버 오류가 발생했습니다.",
+    message: isRateLimit
+      ? "네이버 검색 API 속도 제한에 걸렸습니다. 1분 정도 기다린 뒤 다시 분석해주세요."
+      : error.message || "서버 오류가 발생했습니다.",
     details: error.details || undefined
   });
 });

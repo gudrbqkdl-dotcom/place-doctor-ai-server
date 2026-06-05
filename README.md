@@ -50,6 +50,8 @@ npm start
 ```bash
 NAVER_CLIENT_ID=네이버_Client_ID
 NAVER_CLIENT_SECRET=네이버_Client_Secret
+OPENAI_API_KEY=OpenAI_API_Key_선택사항
+OPENAI_MODEL=gpt-5.4-mini
 ```
 
 로컬에서 PowerShell을 사용할 경우 예시는 아래와 같습니다.
@@ -57,8 +59,13 @@ NAVER_CLIENT_SECRET=네이버_Client_Secret
 ```powershell
 $env:NAVER_CLIENT_ID="네이버_Client_ID"
 $env:NAVER_CLIENT_SECRET="네이버_Client_Secret"
+$env:OPENAI_API_KEY="OpenAI_API_Key_선택사항"
 npm start
 ```
+
+`OPENAI_API_KEY`는 선택사항입니다. 이 값을 넣으면 상위 블로그 분석 결과를 바탕으로 ChatGPT 방식의 블로그 초안을 생성합니다. 넣지 않아도 서비스는 작동하며, 서버에 내장된 기본 초안 생성 로직이 대신 실행됩니다.
+
+중요: OpenAI API 키도 네이버 API 키처럼 프론트엔드 HTML에 넣으면 안 됩니다. Render 서버의 Environment Variables에만 넣으세요.
 
 ## Render에 서버 배포하는 법
 
@@ -79,7 +86,11 @@ Start Command: npm start
 ```text
 NAVER_CLIENT_ID
 NAVER_CLIENT_SECRET
+OPENAI_API_KEY
+OPENAI_MODEL
 ```
+
+`OPENAI_API_KEY`는 ChatGPT 기반 블로그 자동작성을 쓰고 싶을 때만 넣으면 됩니다. `OPENAI_MODEL`은 비워도 되지만, 넣는다면 `gpt-5.4-mini`처럼 사용할 모델명을 입력합니다.
 
 7. 배포가 끝나면 Render에서 제공하는 주소를 확인합니다.
 
@@ -115,9 +126,21 @@ https://place-doctor-ai.onrender.com
   "businessName": "트리트라움 피트니스",
   "keyword": "동해헬스장",
   "category": "헬스장",
-  "blogText": "분석할 블로그 본문"
+  "blogText": "선택 메모"
 }
 ```
+
+업체명 칸에 아래처럼 같이 입력해도 서버가 자동으로 나눕니다.
+
+```json
+{
+  "businessName": "트리트라움 (강릉헬스장)",
+  "keyword": "동핼헬스장",
+  "category": "헬스장"
+}
+```
+
+위 예시는 서버에서 자동으로 `businessName=트리트라움`, `keyword=강릉헬스장`으로 정리됩니다.
 
 응답:
 
@@ -132,6 +155,8 @@ https://place-doctor-ai.onrender.com
   "blogResults": [],
   "actions": [],
   "draft": "AI 자동 작성 블로그 초안",
+  "draftSource": "openai",
+  "normalizedInput": {},
   "prompt": "AI 블로그 작성 프롬프트"
 }
 ```
@@ -142,7 +167,9 @@ https://place-doctor-ai.onrender.com
 - 네이버 공식 지역검색 API는 최대 5개 결과만 제공하므로, 6위 이하의 정확한 순위는 공식 API만으로 확인할 수 없습니다.
 - 키워드 검색에 업체가 없을 경우 업체명, 업체명+키워드, 업체명+업종 검색을 추가로 확인해 업체 등록 여부를 보조 판단합니다.
 - 강원도 운동 업종 키워드는 강릉, 동해, 원주, 춘천, 속초, 삼척, 태백, 홍천, 횡성, 영월, 평창, 정선, 철원, 화천, 양구, 인제, 고성, 양양과 헬스장, 헬스, 피트니스, PT, 피티, 운동 키워드로 자동 확장합니다.
+- 네이버 API 속도 제한을 피하기 위해 검색 요청은 순차 처리하고, 같은 검색 결과는 10분간 캐시합니다.
 - 네이버 블로그 검색 결과에서 업체명 또는 키워드가 포함된 글을 찾아 블로그 순위를 계산합니다.
-- 블로그 본문은 키워드 배치, 첫 350자, 본문 길이, 후기형 단어, 구조 단어, 방문 유도 단어를 기준으로 점수화합니다.
+- 블로그 글 점수는 사용자가 직접 붙여넣은 본문이 아니라, 네이버 블로그 검색 상위 결과의 제목과 설명 문맥을 기준으로 계산합니다.
 - 입력한 업체명, 키워드, 업종과 상위 블로그 목록을 참고해 블로그 초안을 자동 생성합니다.
+- `OPENAI_API_KEY`가 있으면 OpenAI Responses API로 초안을 생성하고, 없거나 실패하면 내장 초안 생성 로직으로 대체합니다.
 - 1등 가능성 점수는 플레이스 순위, 블로그 순위, 블로그 글 점수, 지역 검색 노출 여부를 합산한 추정 점수입니다.
