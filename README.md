@@ -53,7 +53,9 @@ NAVER_CLIENT_SECRET=네이버_Client_Secret
 OPENAI_API_KEY=OpenAI_API_Key_선택사항
 OPENAI_MODEL=gpt-5.2
 OPENAI_API_BASE_URL=https://api.openai.com/v1
+OPENAI_API_STYLE=responses
 OPENAI_RESPONSES_URL=
+OPENAI_CHAT_COMPLETIONS_URL=
 ```
 
 로컬에서 PowerShell을 사용할 경우 예시는 아래와 같습니다.
@@ -63,6 +65,7 @@ $env:NAVER_CLIENT_ID="네이버_Client_ID"
 $env:NAVER_CLIENT_SECRET="네이버_Client_Secret"
 $env:OPENAI_API_KEY="OpenAI_API_Key_선택사항"
 $env:OPENAI_API_BASE_URL="https://api.openai.com/v1"
+$env:OPENAI_API_STYLE="responses"
 npm start
 ```
 
@@ -92,7 +95,9 @@ NAVER_CLIENT_SECRET
 OPENAI_API_KEY
 OPENAI_MODEL
 OPENAI_API_BASE_URL
+OPENAI_API_STYLE
 OPENAI_RESPONSES_URL
+OPENAI_CHAT_COMPLETIONS_URL
 ```
 
 `OPENAI_API_KEY`는 ChatGPT 기반 블로그 자동작성을 쓰고 싶을 때만 넣으면 됩니다. `OPENAI_MODEL`은 비워도 되지만, 넣는다면 `gpt-5.2`처럼 사용할 모델명을 입력합니다.
@@ -101,9 +106,17 @@ OpenAI 프록시 서버를 쓰는 경우에는 아래처럼 넣을 수 있습니
 
 ```text
 OPENAI_API_BASE_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev
+OPENAI_API_STYLE=chat
 ```
 
-만약 프록시 주소 전체가 `/responses` 요청까지 직접 처리하는 형태라면 `OPENAI_RESPONSES_URL`에 전체 주소를 넣으세요.
+만약 프록시 주소 전체가 Chat Completions 요청을 직접 처리하는 형태라면 아래처럼 전체 주소를 넣으세요.
+
+```text
+OPENAI_CHAT_COMPLETIONS_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev
+OPENAI_API_STYLE=chat
+```
+
+만약 프록시 주소가 OpenAI Responses 요청을 직접 처리하는 형태라면 `OPENAI_RESPONSES_URL`에 전체 주소를 넣고 `OPENAI_API_STYLE=responses`로 설정하세요.
 
 7. 배포가 끝나면 Render에서 제공하는 주소를 확인합니다.
 
@@ -122,7 +135,7 @@ https://place-doctor-ai.onrender.com
 
 ```html
 <script>
-  const API_URL = "https://winter-resonance-93f1.qkdlgudrb.workers.dev";
+  const API_URL = "https://place-doctor-ai-server.onrender.com";
 </script>
 ```
 

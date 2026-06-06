@@ -8,7 +8,15 @@ const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.2";
 const OPENAI_API_BASE_URL = (process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+const OPENAI_API_STYLE = (process.env.OPENAI_API_STYLE || (OPENAI_API_BASE_URL.includes("workers.dev") ? "chat" : "responses")).toLowerCase();
 const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || `${OPENAI_API_BASE_URL}/responses`;
+const OPENAI_CHAT_COMPLETIONS_URL = process.env.OPENAI_CHAT_COMPLETIONS_URL || `${OPENAI_API_BASE_URL}/chat/completions`;
+const OPENAI_PROXY_CONFIGURED = Boolean(
+  process.env.OPENAI_RESPONSES_URL ||
+    process.env.OPENAI_CHAT_COMPLETIONS_URL ||
+    OPENAI_API_BASE_URL !== "https://api.openai.com/v1"
+);
+const OPENAI_ENABLED = Boolean(OPENAI_API_KEY || OPENAI_PROXY_CONFIGURED);
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -890,6 +898,16 @@ function extractOpenAIText(data) {
     });
   });
 
+  const chatChoices = Array.isArray(data?.choices) ? data.choices : [];
+  chatChoices.forEach((choice) => {
+    if (typeof choice.message?.content === "string") {
+      parts.push(choice.message.content);
+    }
+    if (typeof choice.text === "string") {
+      parts.push(choice.text);
+    }
+  });
+
   return parts.join("\n").trim();
 }
 
@@ -905,7 +923,7 @@ async function createOpenAIBlogDraft({
   normalizedInput,
   recommendedKeywords
 }) {
-  if (!OPENAI_API_KEY) return null;
+  if (!OPENAI_ENABLED) return null;
 
   const topBlogs = blogResults.slice(0, 5).map((item) => ({
     rank: item.rank,
@@ -935,47 +953,62 @@ async function createOpenAIBlogDraft({
     competitors
   };
 
-  const response = await fetch(OPENAI_RESPONSES_URL, {
+  const instructions = [
+    "너는 네이버 블로그 상위노출을 목표로 로컬 비즈니스 글을 설계하는 한국어 콘텐츠 전략가다.",
+    "네이버 공식 1등 보장처럼 단정하지 말고, 공식 검색 API에서 확인된 상위 글의 문맥을 참고한 공략 초안이라고 표현한다.",
+    "상위 블로그의 문장을 복사하지 말고 제목 구조, 정보 순서, 방문 의도, 지역 키워드 문맥만 참고한다.",
+    "글은 실제 방문 후기처럼 자연스럽게 쓰고 과장 광고, 허위 후기, 순위 보장 표현은 피한다.",
+    "업체명과 키워드는 사용자가 입력한 값과 recommendedKeywords만 기준으로 삼는다. 다른 지역이나 이전 기본값을 섞지 않는다.",
+    "완성 원고는 사람이 바로 네이버 블로그에 올릴 수 있는 자연스러운 한국어로 작성한다.",
+    "원고는 반드시 3000자 이상으로 작성한다. 짧게 요약하지 말고, 소제목별로 충분한 문단을 작성한다.",
+    "현재 상위 블로그를 이기기 위한 차별화 포인트는 정보량, 실제 방문 전 체크리스트, 시설/가격/위치/상담 비교, 네이버 플레이스 전환 문맥이다."
+  ].join("\n");
+  const userPrompt = [
+    "아래 JSON 데이터를 바탕으로 블로그 초안을 작성해줘.",
+    "",
+    JSON.stringify(input, null, 2),
+    "",
+    "출력 형식:",
+    "1. 자동 추천 키워드 전략",
+    "- 메인 키워드",
+    "- 보조 키워드",
+    "- 연관 키워드",
+    "- 다음 추천 키워드",
+    "- 제목에 넣을 키워드",
+    "- 본문에 분산할 키워드",
+    "2. 상위 블로그를 이기는 글쓰기 방법",
+    "3. 다음 추천 키워드별 글감",
+    "4. 추천 블로그 제목 7개",
+    "5. 상위 블로그에서 발견한 공략 포인트 요약",
+    "6. 3000자 이상 완성형 블로그 본문",
+    "7. 네이버 지도/스마트플레이스 방문 유도 문장 5개",
+    "8. 발행 전 체크리스트"
+  ].join("\n");
+  const useChatCompletions = OPENAI_API_STYLE === "chat";
+  const openAIUrl = useChatCompletions ? OPENAI_CHAT_COMPLETIONS_URL : OPENAI_RESPONSES_URL;
+  const openAIBody = useChatCompletions
+    ? {
+        model: OPENAI_MODEL,
+        messages: [
+          { role: "system", content: instructions },
+          { role: "user", content: userPrompt }
+        ],
+        max_tokens: 9000
+      }
+    : {
+        model: OPENAI_MODEL,
+        instructions,
+        input: userPrompt,
+        max_output_tokens: 9000
+      };
+
+  const response = await fetch(openAIUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`
+      ...(OPENAI_API_KEY ? { Authorization: `Bearer ${OPENAI_API_KEY}` } : {})
     },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      instructions: [
-        "너는 네이버 블로그 상위노출을 목표로 로컬 비즈니스 글을 설계하는 한국어 콘텐츠 전략가다.",
-        "네이버 공식 1등 보장처럼 단정하지 말고, 공식 검색 API에서 확인된 상위 글의 문맥을 참고한 공략 초안이라고 표현한다.",
-        "상위 블로그의 문장을 복사하지 말고 제목 구조, 정보 순서, 방문 의도, 지역 키워드 문맥만 참고한다.",
-        "글은 실제 방문 후기처럼 자연스럽게 쓰고 과장 광고, 허위 후기, 순위 보장 표현은 피한다.",
-        "업체명과 키워드는 사용자가 입력한 값과 recommendedKeywords만 기준으로 삼는다. 다른 지역이나 이전 기본값을 섞지 않는다.",
-        "완성 원고는 사람이 바로 네이버 블로그에 올릴 수 있는 자연스러운 한국어로 작성한다.",
-        "원고는 반드시 3000자 이상으로 작성한다. 짧게 요약하지 말고, 소제목별로 충분한 문단을 작성한다.",
-        "현재 상위 블로그를 이기기 위한 차별화 포인트는 정보량, 실제 방문 전 체크리스트, 시설/가격/위치/상담 비교, 네이버 플레이스 전환 문맥이다."
-      ].join("\n"),
-      input: [
-        "아래 JSON 데이터를 바탕으로 블로그 초안을 작성해줘.",
-        "",
-        JSON.stringify(input, null, 2),
-        "",
-        "출력 형식:",
-        "1. 자동 추천 키워드 전략",
-        "- 메인 키워드",
-        "- 보조 키워드",
-        "- 연관 키워드",
-        "- 다음 추천 키워드",
-        "- 제목에 넣을 키워드",
-        "- 본문에 분산할 키워드",
-        "2. 상위 블로그를 이기는 글쓰기 방법",
-        "3. 다음 추천 키워드별 글감",
-        "4. 추천 블로그 제목 7개",
-        "5. 상위 블로그에서 발견한 공략 포인트 요약",
-        "6. 3000자 이상 완성형 블로그 본문",
-        "7. 네이버 지도/스마트플레이스 방문 유도 문장 5개",
-        "8. 발행 전 체크리스트"
-      ].join("\n"),
-      max_output_tokens: 9000
-    })
+    body: JSON.stringify(openAIBody)
   });
 
   const body = await response.text();
@@ -1166,7 +1199,7 @@ app.post("/api/analyze", async (req, res, next) => {
       ...(blogRank ? ["블로그 검색 노출 확인"] : ["블로그 미노출"]),
       ...(blogAnalysis.checks.topTitleKeyword ? ["1위권 제목 키워드 확인"] : []),
       ...(blogAnalysis.checks.richTopBlogContext ? ["상위 블로그 5개 분석"] : []),
-      ...(OPENAI_API_KEY ? ["OpenAI 자동작성 연결"] : ["OpenAI 키 미설정"])
+      ...(OPENAI_ENABLED ? ["OpenAI 자동작성 연결"] : ["OpenAI 미설정"])
     ];
     const recommendedKeywords = buildRecommendedKeywords({
       businessName,
@@ -1196,10 +1229,10 @@ app.post("/api/analyze", async (req, res, next) => {
       blogRank,
       recommendedKeywords
     });
-    let draftSource = OPENAI_API_KEY ? "openai-fallback" : "built-in";
-    let openAIStatus = OPENAI_API_KEY ? "ready" : "missing-key";
+    let draftSource = OPENAI_ENABLED ? "openai-fallback" : "built-in";
+    let openAIStatus = OPENAI_ENABLED ? "ready" : "missing-key";
 
-    if (OPENAI_API_KEY) {
+    if (OPENAI_ENABLED) {
       try {
         const openAIDraft = await createOpenAIBlogDraft({
           businessName,
