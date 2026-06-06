@@ -51,12 +51,15 @@ npm start
 NAVER_CLIENT_ID=네이버_Client_ID
 NAVER_CLIENT_SECRET=네이버_Client_Secret
 OPENAI_API_KEY=OpenAI_API_Key_선택사항
-OPENAI_MODEL=gpt-5.2
+OPENAI_MODEL=gpt-4o-mini
 OPENAI_API_BASE_URL=https://api.openai.com/v1
 OPENAI_API_STYLE=responses
 OPENAI_RESPONSES_URL=
 OPENAI_CHAT_COMPLETIONS_URL=
 AI_DRAFT_REQUIRED=true
+AI_MAX_TOKENS=5200
+AI_CONTEXT_RESULT_LIMIT=3
+NAVER_REQUEST_DELAY_MS=90
 ```
 
 로컬에서 PowerShell을 사용할 경우 예시는 아래와 같습니다.
@@ -71,6 +74,8 @@ npm start
 ```
 
 `OPENAI_API_KEY`는 직접 OpenAI를 연결할 때 사용하는 값입니다. Cloudflare Worker 프록시를 쓸 경우에는 `OPENAI_API_KEY` 대신 `OPENAI_CHAT_COMPLETIONS_URL`을 넣으면 됩니다.
+
+속도를 줄이고 싶다면 Render 환경변수에 `OPENAI_MODEL=gpt-4o-mini`, `AI_MAX_TOKENS=5200`, `AI_CONTEXT_RESULT_LIMIT=3`을 넣어두면 됩니다. 원고는 3000자 이상을 유지하면서 너무 길게 늘어지지 않게 생성합니다.
 
 중요: OpenAI API 키도 네이버 API 키처럼 프론트엔드 HTML에 넣으면 안 됩니다. Render 서버의 Environment Variables에만 넣으세요.
 
@@ -103,7 +108,7 @@ OPENAI_RESPONSES_URL
 OPENAI_CHAT_COMPLETIONS_URL
 ```
 
-`OPENAI_API_KEY`는 ChatGPT 기반 블로그 자동작성을 쓰고 싶을 때만 넣으면 됩니다. `OPENAI_MODEL`은 비워도 되지만, 넣는다면 `gpt-5.2`처럼 사용할 모델명을 입력합니다.
+`OPENAI_API_KEY`는 직접 OpenAI를 연결할 때만 넣으면 됩니다. Worker 프록시를 쓰는 경우에는 `OPENAI_CHAT_COMPLETIONS_URL`을 넣습니다. 빠른 생성을 원하면 `OPENAI_MODEL=gpt-4o-mini`를 권장합니다.
 
 Cloudflare Worker 같은 OpenAI 프록시 서버를 쓰는 경우에는 Render 환경변수에 아래처럼 넣습니다.
 
@@ -111,6 +116,9 @@ Cloudflare Worker 같은 OpenAI 프록시 서버를 쓰는 경우에는 Render �
 OPENAI_CHAT_COMPLETIONS_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev
 OPENAI_API_STYLE=chat
 AI_DRAFT_REQUIRED=true
+OPENAI_MODEL=gpt-4o-mini
+AI_MAX_TOKENS=5200
+AI_CONTEXT_RESULT_LIMIT=3
 ```
 
 중요: `https://winter-resonance-93f1.qkdlgudrb.workers.dev` 주소는 아임웹 HTML의 `API_URL`에 넣는 주소가 아닙니다. 이 주소는 Render 서버가 AI 원고를 만들 때 내부에서 사용하는 주소입니다. 아임웹 HTML의 `API_URL`에는 반드시 Render 서버 주소를 넣으세요.

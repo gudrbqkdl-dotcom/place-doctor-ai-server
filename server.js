@@ -6,12 +6,14 @@ const PORT = process.env.PORT || 3000;
 const NAVER_CLIENT_ID = process.env.NAVER_CLIENT_ID;
 const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.2";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_API_BASE_URL = (process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
 const OPENAI_API_STYLE = (process.env.OPENAI_API_STYLE || (OPENAI_API_BASE_URL.includes("workers.dev") ? "chat" : "responses")).toLowerCase();
 const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || `${OPENAI_API_BASE_URL}/responses`;
 const OPENAI_CHAT_COMPLETIONS_URL = process.env.OPENAI_CHAT_COMPLETIONS_URL || `${OPENAI_API_BASE_URL}/chat/completions`;
 const AI_DRAFT_REQUIRED = String(process.env.AI_DRAFT_REQUIRED || "true").toLowerCase() !== "false";
+const AI_MAX_TOKENS = Math.max(4200, Math.min(6500, Number.parseInt(process.env.AI_MAX_TOKENS || "5200", 10) || 5200));
+const AI_CONTEXT_RESULT_LIMIT = Math.max(2, Math.min(5, Number.parseInt(process.env.AI_CONTEXT_RESULT_LIMIT || "3", 10) || 3));
 const OPENAI_PROXY_CONFIGURED = Boolean(
   process.env.OPENAI_RESPONSES_URL ||
     process.env.OPENAI_CHAT_COMPLETIONS_URL ||
@@ -25,7 +27,7 @@ app.use(express.json({ limit: "1mb" }));
 const NAVER_LOCAL_URL = "https://openapi.naver.com/v1/search/local.json";
 const NAVER_BLOG_URL = "https://openapi.naver.com/v1/search/blog.json";
 const NAVER_CACHE_TTL_MS = 10 * 60 * 1000;
-const NAVER_REQUEST_DELAY_MS = 180;
+const NAVER_REQUEST_DELAY_MS = Math.max(60, Number.parseInt(process.env.NAVER_REQUEST_DELAY_MS || "90", 10) || 90);
 const naverCache = new Map();
 
 function stripHtml(value = "") {
@@ -867,7 +869,7 @@ function createPrompt({
     "1. 전략 설명, 분석 보고서, 체크리스트 설명을 앞에 붙이지 말고 완성된 블로그 글만 출력한다.",
     "2. 제목에는 핵심 키워드와 업체명을 자연스럽게 포함한다.",
     "3. 첫 350자 안에 핵심 키워드, 지역명, 업종, 방문 이유, 업체명을 자연스럽게 넣는다.",
-    "4. 본문은 3000자 이상으로 작성한다.",
+    "4. 본문은 3000자 이상, 3600자 안팎으로 작성한다.",
     "5. 후기, 추천, 가격, 시설, 위치, 리뷰, 초보, 다이어트, 운동, PT, 피티 문맥을 자연스럽게 분산한다.",
     "6. 장점, 이유, 비교, 체크, 방문, 상담 흐름으로 소제목을 구성한다.",
     "7. 과장 광고처럼 보이지 않게 실제 방문 후기 톤으로 작성한다.",
@@ -992,14 +994,14 @@ async function createOpenAIBlogDraft({
     throw error;
   }
 
-  const topBlogs = blogResults.slice(0, 5).map((item) => ({
+  const topBlogs = blogResults.slice(0, AI_CONTEXT_RESULT_LIMIT).map((item) => ({
     rank: item.rank,
     title: item.title,
     description: item.description,
     bloggerName: item.bloggerName,
     postdate: item.postdate
   }));
-  const competitors = localResults.slice(0, 5).map((item) => ({
+  const competitors = localResults.slice(0, AI_CONTEXT_RESULT_LIMIT).map((item) => ({
     rank: item.rankLabel || item.rank,
     title: item.title,
     category: item.category,
@@ -1026,7 +1028,7 @@ async function createOpenAIBlogDraft({
     "네이버 공식 1등 보장처럼 단정하지 말고, 실제 방문 후기처럼 자연스럽고 신뢰감 있게 작성한다.",
     "상위 블로그의 문장을 복사하지 말고 제목 구조, 정보 순서, 방문 의도, 지역 키워드 문맥만 참고한다.",
     "업체명과 키워드는 사용자가 입력한 값과 recommendedKeywords만 기준으로 삼는다. 다른 지역이나 이전 기본값을 섞지 않는다.",
-    "원고는 반드시 3000자 이상으로 작성한다. 짧게 요약하지 말고, 소제목별로 충분한 문단을 작성한다.",
+    "원고는 반드시 3000자 이상으로 작성하되 3600자 안팎에서 마무리해 속도를 높인다.",
     "출력에는 분석 과정, 전략 설명, 키워드 목록 해설, 다음 추천 키워드 설명을 넣지 않는다.",
     "반드시 제목, 본문, 태그만 출력한다."
   ].join("\n");
@@ -1037,14 +1039,14 @@ async function createOpenAIBlogDraft({
     "",
     "아래 JSON 데이터는 네이버 검색 API 분석 결과다. 상위 블로그와 경쟁 플레이스의 흐름을 참고하되 문장은 새로 작성해줘.",
     "",
-    JSON.stringify(input, null, 2),
+    JSON.stringify(input),
     "",
     "반드시 아래 형식만 출력해. 다른 설명은 절대 넣지 마.",
     "제목:",
     "핵심 키워드와 업체명이 자연스럽게 들어간 블로그 제목 1개",
     "",
     "본문:",
-    "3000자 이상 완성형 블로그 본문. 소제목을 포함하되, 보고서나 전략 설명이 아니라 실제 블로그 글처럼 작성.",
+    "3000자 이상, 3600자 안팎의 완성형 블로그 본문. 소제목을 포함하되, 보고서나 전략 설명이 아니라 실제 블로그 글처럼 작성.",
     "",
     "태그:",
     "네이버 블로그 태그로 쓸 키워드 10개 안팎"
@@ -1058,7 +1060,7 @@ async function createOpenAIBlogDraft({
       model: OPENAI_MODEL,
       instructions,
       input: userPrompt,
-      max_output_tokens: 9000
+      max_output_tokens: AI_MAX_TOKENS
     });
   }
 
@@ -1070,12 +1072,12 @@ async function createOpenAIBlogDraft({
     {
       model: OPENAI_MODEL,
       messages,
-      max_tokens: 9000
+      max_tokens: AI_MAX_TOKENS
     },
     {
       model: OPENAI_MODEL,
       messages,
-      max_completion_tokens: 9000
+      max_completion_tokens: AI_MAX_TOKENS
     },
     {
       model: OPENAI_MODEL,
@@ -1084,12 +1086,12 @@ async function createOpenAIBlogDraft({
     {
       model: OPENAI_MODEL,
       prompt: fullPrompt,
-      max_tokens: 9000
+      max_tokens: AI_MAX_TOKENS
     },
     {
       model: OPENAI_MODEL,
       input: fullPrompt,
-      max_tokens: 9000
+      max_tokens: AI_MAX_TOKENS
     }
   ];
 
