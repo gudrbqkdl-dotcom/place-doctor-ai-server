@@ -69,7 +69,7 @@ $env:OPENAI_API_STYLE="responses"
 npm start
 ```
 
-`OPENAI_API_KEY`는 선택사항입니다. 이 값을 넣으면 상위 블로그 분석 결과를 바탕으로 ChatGPT 방식의 블로그 초안을 생성합니다. 넣지 않아도 서비스는 작동하며, 서버에 내장된 기본 초안 생성 로직이 대신 실행됩니다.
+`OPENAI_API_KEY`는 선택사항입니다. 이 값을 넣으면 상위 블로그 분석 결과를 바탕으로 네이버 블로그에 바로 올릴 수 있는 발행용 완성 원고를 생성합니다. 넣지 않아도 서비스는 작동하며, 서버에 내장된 기본 원고 생성 로직이 대신 실행됩니다.
 
 중요: OpenAI API 키도 네이버 API 키처럼 프론트엔드 HTML에 넣으면 안 됩니다. Render 서버의 Environment Variables에만 넣으세요.
 
@@ -102,21 +102,14 @@ OPENAI_CHAT_COMPLETIONS_URL
 
 `OPENAI_API_KEY`는 ChatGPT 기반 블로그 자동작성을 쓰고 싶을 때만 넣으면 됩니다. `OPENAI_MODEL`은 비워도 되지만, 넣는다면 `gpt-5.2`처럼 사용할 모델명을 입력합니다.
 
-OpenAI 프록시 서버를 쓰는 경우에는 아래처럼 넣을 수 있습니다.
-
-```text
-OPENAI_API_BASE_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev
-OPENAI_API_STYLE=chat
-```
-
-만약 프록시 주소 전체가 Chat Completions 요청을 직접 처리하는 형태라면 아래처럼 전체 주소를 넣으세요.
+Cloudflare Worker 같은 OpenAI 프록시 서버를 쓰는 경우에는 Render 환경변수에 아래처럼 넣습니다.
 
 ```text
 OPENAI_CHAT_COMPLETIONS_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev
 OPENAI_API_STYLE=chat
 ```
 
-만약 프록시 주소가 OpenAI Responses 요청을 직접 처리하는 형태라면 `OPENAI_RESPONSES_URL`에 전체 주소를 넣고 `OPENAI_API_STYLE=responses`로 설정하세요.
+중요: `https://winter-resonance-93f1.qkdlgudrb.workers.dev` 주소는 아임웹 HTML의 `API_URL`에 넣는 주소가 아닙니다. 이 주소는 Render 서버가 AI 원고를 만들 때 내부에서 사용하는 주소입니다. 아임웹 HTML의 `API_URL`에는 반드시 Render 서버 주소를 넣으세요.
 
 7. 배포가 끝나면 Render에서 제공하는 주소를 확인합니다.
 
@@ -186,7 +179,7 @@ https://place-doctor-ai.onrender.com
     "place": [],
     "content": []
   },
-  "draft": "AI 자동 작성 블로그 초안",
+  "draft": "제목:\n...\n\n본문:\n...\n\n태그:\n#키워드",
   "draftSource": "openai",
   "normalizedInput": {},
   "prompt": "AI 블로그 작성 프롬프트"
@@ -203,6 +196,7 @@ https://place-doctor-ai.onrender.com
 - 네이버 블로그 검색 결과에서 업체명 또는 키워드가 포함된 글을 찾아 블로그 순위를 계산합니다.
 - 블로그 글 점수는 사용자가 직접 붙여넣은 본문이 아니라, 네이버 블로그 검색 상위 결과의 제목과 설명 문맥을 기준으로 계산합니다.
 - 네이버 상위 블로그와 지역 검색 결과를 참고해 메인 키워드, 보조 키워드, 업체명 키워드, 본문 문맥 키워드를 자동 추천합니다.
-- 입력한 업체명, 키워드, 업종, 자동 추천 키워드, 상위 블로그 목록을 참고해 블로그 초안을 자동 생성합니다.
-- `OPENAI_API_KEY`가 있으면 OpenAI Responses API로 초안을 생성하고, 없거나 실패하면 내장 초안 생성 로직으로 대체합니다.
+- 입력한 업체명, 키워드, 업종, 자동 추천 키워드, 상위 블로그 목록을 참고해 네이버 블로그 발행용 완성 원고를 자동 생성합니다.
+- 완성 원고는 전략 보고서가 아니라 `제목`, `본문`, `태그` 형태로 바로 복사해 올릴 수 있게 생성됩니다.
+- `OPENAI_API_KEY` 또는 OpenAI 프록시 주소가 있으면 AI로 원고를 생성하고, 없거나 실패하면 내장 원고 생성 로직으로 대체합니다.
 - 1등 가능성 점수는 플레이스 순위, 블로그 순위, 블로그 글 점수, 지역 검색 노출 여부를 합산한 추정 점수입니다.
