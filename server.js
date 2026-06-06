@@ -11,6 +11,7 @@ const OPENAI_API_BASE_URL = (process.env.OPENAI_API_BASE_URL || "https://api.ope
 const OPENAI_API_STYLE = (process.env.OPENAI_API_STYLE || (OPENAI_API_BASE_URL.includes("workers.dev") ? "chat" : "responses")).toLowerCase();
 const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || `${OPENAI_API_BASE_URL}/responses`;
 const OPENAI_CHAT_COMPLETIONS_URL = process.env.OPENAI_CHAT_COMPLETIONS_URL || `${OPENAI_API_BASE_URL}/chat/completions`;
+const AI_DRAFT_REQUIRED = String(process.env.AI_DRAFT_REQUIRED || "true").toLowerCase() !== "false";
 const OPENAI_PROXY_CONFIGURED = Boolean(
   process.env.OPENAI_RESPONSES_URL ||
     process.env.OPENAI_CHAT_COMPLETIONS_URL ||
@@ -901,12 +902,73 @@ function extractOpenAIText(data) {
     if (typeof choice.message?.content === "string") {
       parts.push(choice.message.content);
     }
+    if (Array.isArray(choice.message?.content)) {
+      choice.message.content.forEach((contentItem) => {
+        if (typeof contentItem.text === "string") {
+          parts.push(contentItem.text);
+        }
+        if (typeof contentItem.content === "string") {
+          parts.push(contentItem.content);
+        }
+      });
+    }
     if (typeof choice.text === "string") {
       parts.push(choice.text);
     }
   });
 
-  return parts.join("\n").trim();
+  const extractedText = parts.join("\n").trim();
+  if (extractedText) {
+    return extractedText;
+  }
+
+  const directTextFields = [
+    data?.text,
+    data?.content,
+    data?.result,
+    data?.response,
+    data?.message
+  ];
+  const directText = directTextFields.find((value) => typeof value === "string" && value.trim());
+  return directText ? directText.trim() : "";
+}
+
+async function postOpenAI(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(OPENAI_API_KEY ? { Authorization: `Bearer ${OPENAI_API_KEY}` } : {})
+    },
+    body: JSON.stringify(body)
+  });
+
+  const responseBody = await response.text();
+  let data;
+  try {
+    data = JSON.parse(responseBody);
+  } catch (error) {
+    data = { error: { message: responseBody } };
+  }
+
+  if (!response.ok) {
+    const apiError = new Error(
+      data.error?.message || data.message || "AI 블로그 원고 생성에 실패했습니다."
+    );
+    apiError.status = response.status;
+    apiError.details = data;
+    throw apiError;
+  }
+
+  const text = extractOpenAIText(data);
+  if (!text) {
+    const emptyError = new Error("AI 응답은 왔지만 블로그 원고 내용이 비어 있습니다.");
+    emptyError.status = 502;
+    emptyError.details = data;
+    throw emptyError;
+  }
+
+  return text;
 }
 
 async function createOpenAIBlogDraft({
@@ -919,9 +981,16 @@ async function createOpenAIBlogDraft({
   placeRankLabel,
   blogRank,
   normalizedInput,
-  recommendedKeywords
+  recommendedKeywords,
+  writingPrompt
 }) {
-  if (!OPENAI_ENABLED) return null;
+  if (!OPENAI_ENABLED) {
+    const error = new Error(
+      "AI 블로그 작성 서버가 연결되지 않았습니다. Render 환경변수에 OPENAI_CHAT_COMPLETIONS_URL 또는 OPENAI_API_KEY를 넣어주세요."
+    );
+    error.status = 503;
+    throw error;
+  }
 
   const topBlogs = blogResults.slice(0, 5).map((item) => ({
     rank: item.rank,
@@ -952,22 +1021,25 @@ async function createOpenAIBlogDraft({
   };
 
   const instructions = [
-    "너는 네이버 블로그 상위노출을 목표로 로컬 비즈니스 글을 설계하는 한국어 콘텐츠 전략가다.",
-    "네이버 공식 1등 보장처럼 단정하지 말고, 실제 방문 후기처럼 자연스러운 완성 원고를 작성한다.",
+    "너는 네이버 블로그, 네이버 플레이스, 로컬 마케팅에 강한 한국어 블로그 전문 작가다.",
+    "목표는 사용자가 네이버 블로그에 바로 붙여넣어 발행할 수 있는 완성 원고를 작성하는 것이다.",
+    "네이버 공식 1등 보장처럼 단정하지 말고, 실제 방문 후기처럼 자연스럽고 신뢰감 있게 작성한다.",
     "상위 블로그의 문장을 복사하지 말고 제목 구조, 정보 순서, 방문 의도, 지역 키워드 문맥만 참고한다.",
-    "글은 실제 방문 후기처럼 자연스럽게 쓰고 과장 광고, 허위 후기, 순위 보장 표현은 피한다.",
     "업체명과 키워드는 사용자가 입력한 값과 recommendedKeywords만 기준으로 삼는다. 다른 지역이나 이전 기본값을 섞지 않는다.",
-    "완성 원고는 사람이 바로 네이버 블로그에 올릴 수 있는 자연스러운 한국어로 작성한다.",
     "원고는 반드시 3000자 이상으로 작성한다. 짧게 요약하지 말고, 소제목별로 충분한 문단을 작성한다.",
-    "현재 상위 블로그를 이기기 위한 차별화 포인트는 정보량, 실제 방문 전 체크리스트, 시설/가격/위치/상담 비교, 네이버 플레이스 전환 문맥이다.",
-    "출력에는 분석 과정, 전략 설명, 키워드 목록 해설, 다음 추천 키워드 설명을 넣지 않는다. 발행용 제목, 본문, 태그만 출력한다."
+    "출력에는 분석 과정, 전략 설명, 키워드 목록 해설, 다음 추천 키워드 설명을 넣지 않는다.",
+    "반드시 제목, 본문, 태그만 출력한다."
   ].join("\n");
   const userPrompt = [
-    "아래 JSON 데이터를 바탕으로 네이버 블로그에 바로 올릴 수 있는 완성 원고를 작성해줘.",
+    "아래는 화면의 자동 적용 프롬프트다. 이 조건을 그대로 적용해서 네이버 블로그 발행용 완성 원고를 작성해줘.",
+    "",
+    writingPrompt,
+    "",
+    "아래 JSON 데이터는 네이버 검색 API 분석 결과다. 상위 블로그와 경쟁 플레이스의 흐름을 참고하되 문장은 새로 작성해줘.",
     "",
     JSON.stringify(input, null, 2),
     "",
-    "반드시 아래 형식만 출력해.",
+    "반드시 아래 형식만 출력해. 다른 설명은 절대 넣지 마.",
     "제목:",
     "핵심 키워드와 업체명이 자연스럽게 들어간 블로그 제목 1개",
     "",
@@ -979,49 +1051,61 @@ async function createOpenAIBlogDraft({
   ].join("\n");
   const useChatCompletions = OPENAI_API_STYLE === "chat";
   const openAIUrl = useChatCompletions ? OPENAI_CHAT_COMPLETIONS_URL : OPENAI_RESPONSES_URL;
-  const openAIBody = useChatCompletions
-    ? {
-        model: OPENAI_MODEL,
-        messages: [
-          { role: "system", content: instructions },
-          { role: "user", content: userPrompt }
-        ],
-        max_tokens: 9000
-      }
-    : {
-        model: OPENAI_MODEL,
-        instructions,
-        input: userPrompt,
-        max_output_tokens: 9000
-      };
+  const fullPrompt = `${instructions}\n\n${userPrompt}`;
 
-  const response = await fetch(openAIUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(OPENAI_API_KEY ? { Authorization: `Bearer ${OPENAI_API_KEY}` } : {})
+  if (!useChatCompletions) {
+    return postOpenAI(openAIUrl, {
+      model: OPENAI_MODEL,
+      instructions,
+      input: userPrompt,
+      max_output_tokens: 9000
+    });
+  }
+
+  const messages = [
+    { role: "system", content: instructions },
+    { role: "user", content: userPrompt }
+  ];
+  const chatAttempts = [
+    {
+      model: OPENAI_MODEL,
+      messages,
+      max_tokens: 9000
     },
-    body: JSON.stringify(openAIBody)
-  });
+    {
+      model: OPENAI_MODEL,
+      messages,
+      max_completion_tokens: 9000
+    },
+    {
+      model: OPENAI_MODEL,
+      messages
+    },
+    {
+      model: OPENAI_MODEL,
+      prompt: fullPrompt,
+      max_tokens: 9000
+    },
+    {
+      model: OPENAI_MODEL,
+      input: fullPrompt,
+      max_tokens: 9000
+    }
+  ];
 
-  const body = await response.text();
-  let data;
-  try {
-    data = JSON.parse(body);
-  } catch (error) {
-    data = { error: { message: body } };
+  let lastError;
+  for (const body of chatAttempts) {
+    try {
+      return await postOpenAI(openAIUrl, body);
+    } catch (error) {
+      lastError = error;
+      if (error.status && error.status !== 400) {
+        break;
+      }
+    }
   }
 
-  if (!response.ok) {
-    const error = new Error(
-      data.error?.message || data.message || "OpenAI 블로그 초안 생성에 실패했습니다."
-    );
-    error.status = response.status;
-    error.details = data;
-    throw error;
-  }
-
-  return extractOpenAIText(data);
+  throw lastError || new Error("AI 블로그 원고 생성에 실패했습니다.");
 }
 
 function createBlogDraft({
@@ -1144,7 +1228,7 @@ app.post("/api/analyze", async (req, res, next) => {
       ...(blogRank ? ["블로그 검색 노출 확인"] : ["블로그 미노출"]),
       ...(blogAnalysis.checks.topTitleKeyword ? ["1위권 제목 키워드 확인"] : []),
       ...(blogAnalysis.checks.richTopBlogContext ? ["상위 블로그 5개 분석"] : []),
-      ...(OPENAI_ENABLED ? ["OpenAI 자동작성 연결"] : ["OpenAI 미설정"])
+      ...(OPENAI_ENABLED ? ["AI 원고 작성 연결"] : ["AI 원고 작성 미설정"])
     ];
     const recommendedKeywords = buildRecommendedKeywords({
       businessName,
@@ -1163,23 +1247,21 @@ app.post("/api/analyze", async (req, res, next) => {
       placeRankLabel: localAnalysis.placeRankLabel,
       recommendedKeywords
     });
-    let draft = createBlogDraft({
-      businessName,
-      keyword,
-      category,
-      blogResults,
-      localResults,
-      blogScore,
-      placeRankLabel: localAnalysis.placeRankLabel,
-      blogRank,
-      recommendedKeywords
-    });
-    let draftSource = OPENAI_ENABLED ? "openai-fallback" : "built-in";
+    let draft = "";
+    let draftSource = "";
     let openAIStatus = OPENAI_ENABLED ? "ready" : "missing-key";
 
-    if (OPENAI_ENABLED) {
-      try {
-        const openAIDraft = await createOpenAIBlogDraft({
+    if (!OPENAI_ENABLED && AI_DRAFT_REQUIRED) {
+      const error = new Error(
+        "AI 블로그 작성 서버가 연결되지 않았습니다. Render 환경변수에 OPENAI_CHAT_COMPLETIONS_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev 와 OPENAI_API_STYLE=chat 을 넣어주세요."
+      );
+      error.status = 503;
+      throw error;
+    }
+
+    try {
+      if (OPENAI_ENABLED) {
+        draft = await createOpenAIBlogDraft({
           businessName,
           keyword,
           category,
@@ -1189,18 +1271,35 @@ app.post("/api/analyze", async (req, res, next) => {
           placeRankLabel: localAnalysis.placeRankLabel,
           blogRank,
           normalizedInput,
-          recommendedKeywords
+          recommendedKeywords,
+          writingPrompt: prompt
         });
-
-        if (openAIDraft) {
-          draft = openAIDraft;
-          draftSource = "openai";
-          openAIStatus = "connected";
-        }
-      } catch (error) {
-        console.error("OpenAI draft generation failed:", error.message);
-        openAIStatus = "failed";
+        draftSource = "openai";
+        openAIStatus = "connected";
       }
+    } catch (error) {
+      console.error("AI draft generation failed:", error.message);
+      openAIStatus = "failed";
+      if (AI_DRAFT_REQUIRED) {
+        error.status = error.status || 502;
+        error.message = `AI 블로그 원고 작성에 실패했습니다. Render의 OPENAI_CHAT_COMPLETIONS_URL, OPENAI_API_STYLE, OPENAI_MODEL 설정을 확인해주세요. 원인: ${error.message}`;
+        throw error;
+      }
+    }
+
+    if (!draft) {
+      draft = createBlogDraft({
+        businessName,
+        keyword,
+        category,
+        blogResults,
+        localResults,
+        blogScore,
+        placeRankLabel: localAnalysis.placeRankLabel,
+        blogRank,
+        recommendedKeywords
+      });
+      draftSource = "built-in";
     }
 
     res.json({

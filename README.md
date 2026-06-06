@@ -56,6 +56,7 @@ OPENAI_API_BASE_URL=https://api.openai.com/v1
 OPENAI_API_STYLE=responses
 OPENAI_RESPONSES_URL=
 OPENAI_CHAT_COMPLETIONS_URL=
+AI_DRAFT_REQUIRED=true
 ```
 
 로컬에서 PowerShell을 사용할 경우 예시는 아래와 같습니다.
@@ -69,9 +70,11 @@ $env:OPENAI_API_STYLE="responses"
 npm start
 ```
 
-`OPENAI_API_KEY`는 선택사항입니다. 이 값을 넣으면 상위 블로그 분석 결과를 바탕으로 네이버 블로그에 바로 올릴 수 있는 발행용 완성 원고를 생성합니다. 넣지 않아도 서비스는 작동하며, 서버에 내장된 기본 원고 생성 로직이 대신 실행됩니다.
+`OPENAI_API_KEY`는 직접 OpenAI를 연결할 때 사용하는 값입니다. Cloudflare Worker 프록시를 쓸 경우에는 `OPENAI_API_KEY` 대신 `OPENAI_CHAT_COMPLETIONS_URL`을 넣으면 됩니다.
 
 중요: OpenAI API 키도 네이버 API 키처럼 프론트엔드 HTML에 넣으면 안 됩니다. Render 서버의 Environment Variables에만 넣으세요.
+
+현재 버전은 `AI_DRAFT_REQUIRED=true`가 기본값입니다. 즉 AI 원고 작성 서버가 연결되지 않으면 기본 원고로 몰래 넘어가지 않고 오류를 보여줍니다. 반드시 AI로 블로그 글을 작성하게 하기 위한 설정입니다. 테스트용으로만 기본 원고를 허용하려면 Render 환경변수에 `AI_DRAFT_REQUIRED=false`를 넣으면 됩니다.
 
 ## Render에 서버 배포하는 법
 
@@ -107,6 +110,7 @@ Cloudflare Worker 같은 OpenAI 프록시 서버를 쓰는 경우에는 Render �
 ```text
 OPENAI_CHAT_COMPLETIONS_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev
 OPENAI_API_STYLE=chat
+AI_DRAFT_REQUIRED=true
 ```
 
 중요: `https://winter-resonance-93f1.qkdlgudrb.workers.dev` 주소는 아임웹 HTML의 `API_URL`에 넣는 주소가 아닙니다. 이 주소는 Render 서버가 AI 원고를 만들 때 내부에서 사용하는 주소입니다. 아임웹 HTML의 `API_URL`에는 반드시 Render 서버 주소를 넣으세요.
@@ -198,5 +202,5 @@ https://place-doctor-ai.onrender.com
 - 네이버 상위 블로그와 지역 검색 결과를 참고해 메인 키워드, 보조 키워드, 업체명 키워드, 본문 문맥 키워드를 자동 추천합니다.
 - 입력한 업체명, 키워드, 업종, 자동 추천 키워드, 상위 블로그 목록을 참고해 네이버 블로그 발행용 완성 원고를 자동 생성합니다.
 - 완성 원고는 전략 보고서가 아니라 `제목`, `본문`, `태그` 형태로 바로 복사해 올릴 수 있게 생성됩니다.
-- `OPENAI_API_KEY` 또는 OpenAI 프록시 주소가 있으면 AI로 원고를 생성하고, 없거나 실패하면 내장 원고 생성 로직으로 대체합니다.
+- `AI_DRAFT_REQUIRED=true` 상태에서는 OpenAI 프록시 주소 또는 OpenAI API 키가 있어야 원고가 생성됩니다. AI 연결이 실패하면 기본 원고로 대체하지 않고 오류를 보여줍니다.
 - 1등 가능성 점수는 플레이스 순위, 블로그 순위, 블로그 글 점수, 지역 검색 노출 여부를 합산한 추정 점수입니다.
