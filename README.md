@@ -51,7 +51,9 @@ npm start
 NAVER_CLIENT_ID=네이버_Client_ID
 NAVER_CLIENT_SECRET=네이버_Client_Secret
 OPENAI_API_KEY=OpenAI_API_Key_선택사항
-OPENAI_MODEL=gpt-5.4-mini
+OPENAI_MODEL=gpt-5.2
+OPENAI_API_BASE_URL=https://api.openai.com/v1
+OPENAI_RESPONSES_URL=
 ```
 
 로컬에서 PowerShell을 사용할 경우 예시는 아래와 같습니다.
@@ -60,6 +62,7 @@ OPENAI_MODEL=gpt-5.4-mini
 $env:NAVER_CLIENT_ID="네이버_Client_ID"
 $env:NAVER_CLIENT_SECRET="네이버_Client_Secret"
 $env:OPENAI_API_KEY="OpenAI_API_Key_선택사항"
+$env:OPENAI_API_BASE_URL="https://api.openai.com/v1"
 npm start
 ```
 
@@ -88,9 +91,19 @@ NAVER_CLIENT_ID
 NAVER_CLIENT_SECRET
 OPENAI_API_KEY
 OPENAI_MODEL
+OPENAI_API_BASE_URL
+OPENAI_RESPONSES_URL
 ```
 
-`OPENAI_API_KEY`는 ChatGPT 기반 블로그 자동작성을 쓰고 싶을 때만 넣으면 됩니다. `OPENAI_MODEL`은 비워도 되지만, 넣는다면 `gpt-5.4-mini`처럼 사용할 모델명을 입력합니다.
+`OPENAI_API_KEY`는 ChatGPT 기반 블로그 자동작성을 쓰고 싶을 때만 넣으면 됩니다. `OPENAI_MODEL`은 비워도 되지만, 넣는다면 `gpt-5.2`처럼 사용할 모델명을 입력합니다.
+
+OpenAI 프록시 서버를 쓰는 경우에는 아래처럼 넣을 수 있습니다.
+
+```text
+OPENAI_API_BASE_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev
+```
+
+만약 프록시 주소 전체가 `/responses` 요청까지 직접 처리하는 형태라면 `OPENAI_RESPONSES_URL`에 전체 주소를 넣으세요.
 
 7. 배포가 끝나면 Render에서 제공하는 주소를 확인합니다.
 
@@ -105,11 +118,11 @@ https://place-doctor-ai.onrender.com
 1. `imweb-place-doctor-ai.html` 파일 전체를 복사합니다.
 2. 아임웹 관리자에서 HTML 위젯을 추가합니다.
 3. 복사한 코드를 붙여넣습니다.
-4. 코드 최상단의 `API_URL`을 Render 서버 주소로 바꿉니다.
+4. 코드 최상단의 `API_URL`을 실제 분석 API 서버 주소로 바꿉니다.
 
 ```html
 <script>
-  const API_URL = "https://place-doctor-ai.onrender.com";
+  const API_URL = "https://winter-resonance-93f1.qkdlgudrb.workers.dev";
 </script>
 ```
 
@@ -154,6 +167,12 @@ https://place-doctor-ai.onrender.com
   "localResults": [],
   "blogResults": [],
   "actions": [],
+  "recommendedKeywords": {
+    "primary": [],
+    "longTail": [],
+    "place": [],
+    "content": []
+  },
   "draft": "AI 자동 작성 블로그 초안",
   "draftSource": "openai",
   "normalizedInput": {},
@@ -170,6 +189,7 @@ https://place-doctor-ai.onrender.com
 - 네이버 API 속도 제한을 피하기 위해 검색 요청은 순차 처리하고, 같은 검색 결과는 10분간 캐시합니다.
 - 네이버 블로그 검색 결과에서 업체명 또는 키워드가 포함된 글을 찾아 블로그 순위를 계산합니다.
 - 블로그 글 점수는 사용자가 직접 붙여넣은 본문이 아니라, 네이버 블로그 검색 상위 결과의 제목과 설명 문맥을 기준으로 계산합니다.
-- 입력한 업체명, 키워드, 업종과 상위 블로그 목록을 참고해 블로그 초안을 자동 생성합니다.
+- 네이버 상위 블로그와 지역 검색 결과를 참고해 메인 키워드, 보조 키워드, 업체명 키워드, 본문 문맥 키워드를 자동 추천합니다.
+- 입력한 업체명, 키워드, 업종, 자동 추천 키워드, 상위 블로그 목록을 참고해 블로그 초안을 자동 생성합니다.
 - `OPENAI_API_KEY`가 있으면 OpenAI Responses API로 초안을 생성하고, 없거나 실패하면 내장 초안 생성 로직으로 대체합니다.
 - 1등 가능성 점수는 플레이스 순위, 블로그 순위, 블로그 글 점수, 지역 검색 노출 여부를 합산한 추정 점수입니다.

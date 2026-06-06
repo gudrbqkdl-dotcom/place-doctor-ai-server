@@ -6,14 +6,15 @@ const PORT = process.env.PORT || 3000;
 const NAVER_CLIENT_ID = process.env.NAVER_CLIENT_ID;
 const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.2";
+const OPENAI_API_BASE_URL = (process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || `${OPENAI_API_BASE_URL}/responses`;
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 const NAVER_LOCAL_URL = "https://openapi.naver.com/v1/search/local.json";
 const NAVER_BLOG_URL = "https://openapi.naver.com/v1/search/blog.json";
-const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const NAVER_CACHE_TTL_MS = 10 * 60 * 1000;
 const NAVER_REQUEST_DELAY_MS = 180;
 const naverCache = new Map();
@@ -606,6 +607,160 @@ function calculateTopBlogScore({ blogResults, keyword, category }) {
   };
 }
 
+function getPrimaryRegion(keyword) {
+  const region = findGangwonRegions(keyword)[0];
+  if (region) return region.base;
+
+  const match = String(keyword || "").match(/^([\uac00-\ud7a3]{2,4})(헬스장|헬스|피트니스|PT|피티|운동)/i);
+  return match ? match[1] : "";
+}
+
+function buildRecommendedKeywords({ businessName, keyword, category, blogResults, localResults }) {
+  const region = getPrimaryRegion(keyword);
+  const primaryTerm = getPrimaryFitnessTerm(keyword, category);
+  const baseKeywords = buildKeywordVariants({ keyword, category });
+  const topBlogText = blogResults
+    .slice(0, 8)
+    .map((item) => `${item.title} ${item.description}`)
+    .join(" ");
+  const topPlaceText = localResults
+    .slice(0, 6)
+    .map((item) => `${item.title} ${item.category} ${item.roadAddress || item.address}`)
+    .join(" ");
+
+  const intentWords = [
+    "후기",
+    "추천",
+    "가격",
+    "시설",
+    "위치",
+    "리뷰",
+    "상담",
+    "초보",
+    "다이어트",
+    "운동",
+    "PT",
+    "피티"
+  ];
+  const foundIntentWords = intentWords.filter((word) =>
+    containsNeedle(`${topBlogText} ${topPlaceText} ${keyword} ${category}`, word)
+  );
+  const contentWords = compactUnique([
+    ...foundIntentWords,
+    "방문",
+    "상담",
+    "시설",
+    "위치",
+    "리뷰",
+    "초보",
+    "운동 루틴",
+    "네이버 지도",
+    "스마트플레이스"
+  ]).slice(0, 12);
+
+  const primary = compactUnique([
+    keyword,
+    ...baseKeywords,
+    region && primaryTerm ? `${region}${primaryTerm}` : "",
+    region && primaryTerm ? `${region} ${primaryTerm}` : ""
+  ]).slice(0, 10);
+
+  const longTail = compactUnique([
+    `${keyword} 후기`,
+    `${keyword} 추천`,
+    `${keyword} 가격`,
+    `${keyword} 시설`,
+    `${keyword} 위치`,
+    `${keyword} 리뷰`,
+    `${keyword} PT`,
+    `${keyword} 피티`,
+    `${keyword} 초보`,
+    `${keyword} 다이어트`,
+    region ? `${region} 헬스장 추천` : "",
+    region ? `${region} PT 상담` : ""
+  ]).slice(0, 12);
+
+  const placeKeywords = compactUnique([
+    businessName,
+    `${businessName} ${keyword}`,
+    `${businessName} 후기`,
+    `${businessName} 상담`,
+    `${businessName} 위치`,
+    `${businessName} 리뷰`,
+    `${businessName} PT`,
+    `${businessName} 피티`
+  ]).slice(0, 8);
+
+  const titleKeywords = compactUnique([
+    `${keyword} 찾는다면`,
+    `${keyword} 방문 후기`,
+    `${keyword} 선택 기준`,
+    `${keyword} 초보 상담`,
+    `${businessName} ${keyword}`,
+    `${businessName} 방문 전 체크`
+  ]).slice(0, 8);
+
+  const related = compactUnique([
+    ...baseKeywords,
+    region ? `${region} 헬스` : "",
+    region ? `${region} 헬스장` : "",
+    region ? `${region} 피트니스` : "",
+    region ? `${region} PT` : "",
+    region ? `${region} 피티` : "",
+    region ? `${region} 운동` : "",
+    region ? `${region} 다이어트` : "",
+    region ? `${region} 체형관리` : "",
+    region ? `${region} 근력운동` : "",
+    region ? `${region} 헬스장 가격` : "",
+    region ? `${region} 헬스장 시설` : "",
+    region ? `${region} 헬스장 리뷰` : ""
+  ]).slice(0, 14);
+
+  const nextPlanKeywords = compactUnique([
+    `${keyword} 후기`,
+    `${keyword} 가격`,
+    `${keyword} 시설`,
+    `${keyword} 초보`,
+    `${keyword} PT`,
+    `${keyword} 다이어트`,
+    `${keyword} 운동 루틴`,
+    region ? `${region} 피트니스 추천` : "",
+    region ? `${region} PT 상담` : "",
+    region ? `${region} 헬스장 비교` : ""
+  ]).slice(0, 8);
+
+  const nextPlan = nextPlanKeywords.map((nextKeyword, index) => ({
+    keyword: nextKeyword,
+    reason:
+      index < 3
+        ? "메인 키워드와 바로 이어지는 검색 의도라서 다음 글 주제로 쓰기 좋습니다."
+        : "상담, 시설, 가격, 후기처럼 방문 전환에 가까운 세부 의도를 보강할 수 있습니다.",
+    contentAngle: [
+      `${nextKeyword}를 찾는 사람이 가장 궁금해하는 방문 전 체크포인트`,
+      `${businessName} 기준 시설, 위치, 상담, 운동 목적을 비교하는 방식`,
+      "네이버 지도와 스마트플레이스 확인으로 이어지는 자연스러운 마무리"
+    ].join(" / ")
+  }));
+
+  const writingStrategy = [
+    "상위 블로그보다 더 이기려면 제목만 키워드로 맞추지 말고, 첫 350자 안에 지역명, 업종, 방문 이유, 업체명을 함께 넣어야 합니다.",
+    "본문은 3000자 이상으로 작성하고 시설, 위치, 가격, 상담, 후기, 초보, PT, 피티, 다이어트, 운동 루틴을 소제목별로 나눠 정보 밀도를 높입니다.",
+    "상위 글을 그대로 따라 쓰지 말고 방문 전 체크리스트, 비교 기준, 상담 전 질문, 네이버 지도 확인 문장까지 넣어 플레이스 전환 근거를 강화합니다."
+  ];
+
+  return {
+    primary,
+    longTail,
+    place: placeKeywords,
+    content: contentWords,
+    titles: titleKeywords,
+    related,
+    next: nextPlanKeywords,
+    nextPlan,
+    writingStrategy
+  };
+}
+
 function rankScore(rank, maxScore) {
   if (!rank) return 0;
   if (rank === 1) return maxScore;
@@ -674,8 +829,20 @@ function createPrompt({
   blogScore,
   placeRank,
   blogRank,
-  placeRankLabel
+  placeRankLabel,
+  recommendedKeywords
 }) {
+  const keywordText = recommendedKeywords
+    ? [
+        `핵심 키워드: ${recommendedKeywords.primary.join(", ")}`,
+        `롱테일 키워드: ${recommendedKeywords.longTail.join(", ")}`,
+        `업체 키워드: ${recommendedKeywords.place.join(", ")}`,
+        `본문 문맥 키워드: ${recommendedKeywords.content.join(", ")}`,
+        `연관 키워드: ${recommendedKeywords.related.join(", ")}`,
+        `다음 추천 키워드: ${recommendedKeywords.next.join(", ")}`
+      ].join("\n")
+    : "";
+
   return [
     `너는 네이버 플레이스와 블로그 검색 최적화에 강한 ${category || "로컬 비즈니스"} 콘텐츠 전략가다.`,
     "",
@@ -685,6 +852,7 @@ function createPrompt({
     `현재 플레이스 순위: ${placeRank ? `${placeRank}위` : placeRankLabel || "미노출"}`,
     `현재 블로그 순위: ${blogRank ? `${blogRank}위` : "미노출"}`,
     `현재 블로그 글 품질 점수: ${blogScore}점`,
+    keywordText ? `\n자동 추천 키워드\n${keywordText}` : "",
     "",
     "아래 조건을 지켜 네이버 블로그 글 초안을 작성해줘.",
     "1. 제목에는 핵심 키워드와 업체명을 자연스럽게 포함한다.",
@@ -694,9 +862,12 @@ function createPrompt({
     "5. 과장 광고처럼 보이지 않게 실제 방문 후기 톤으로 작성한다.",
     "6. 마지막 문단에는 네이버 지도 또는 스마트플레이스에서 업체를 확인하도록 유도한다.",
     "7. 글 전체는 3000자 이상으로 작성하고, 검색어 반복은 자연스럽게 유지한다.",
+    "8. 현재 상위 블로그보다 더 상세하게 시설, 상담, 비교 기준, 방문 전 체크리스트, 다음 행동을 설명한다.",
     "",
     "출력 형식:",
+    "- 상위 블로그를 이기는 글쓰기 전략",
     "- 블로그 제목 5개",
+    "- 다음 추천 키워드와 글감",
     "- 본문 소제목 구조",
     "- 3000자 이상 본문 초안",
     "- 네이버 지도 방문 유도 문장 3개"
@@ -731,7 +902,8 @@ async function createOpenAIBlogDraft({
   blogScore,
   placeRankLabel,
   blogRank,
-  normalizedInput
+  normalizedInput,
+  recommendedKeywords
 }) {
   if (!OPENAI_API_KEY) return null;
 
@@ -758,6 +930,7 @@ async function createOpenAIBlogDraft({
     blogRank: blogRank ? `${blogRank}위` : "미노출",
     topBlogSignalScore: blogScore,
     normalizedInput,
+    recommendedKeywords,
     topBlogs,
     competitors
   };
@@ -775,7 +948,10 @@ async function createOpenAIBlogDraft({
         "네이버 공식 1등 보장처럼 단정하지 말고, 공식 검색 API에서 확인된 상위 글의 문맥을 참고한 공략 초안이라고 표현한다.",
         "상위 블로그의 문장을 복사하지 말고 제목 구조, 정보 순서, 방문 의도, 지역 키워드 문맥만 참고한다.",
         "글은 실제 방문 후기처럼 자연스럽게 쓰고 과장 광고, 허위 후기, 순위 보장 표현은 피한다.",
-        "업체명과 키워드는 사용자가 입력한 값만 기준으로 삼는다. 다른 지역이나 이전 기본값을 섞지 않는다."
+        "업체명과 키워드는 사용자가 입력한 값과 recommendedKeywords만 기준으로 삼는다. 다른 지역이나 이전 기본값을 섞지 않는다.",
+        "완성 원고는 사람이 바로 네이버 블로그에 올릴 수 있는 자연스러운 한국어로 작성한다.",
+        "원고는 반드시 3000자 이상으로 작성한다. 짧게 요약하지 말고, 소제목별로 충분한 문단을 작성한다.",
+        "현재 상위 블로그를 이기기 위한 차별화 포인트는 정보량, 실제 방문 전 체크리스트, 시설/가격/위치/상담 비교, 네이버 플레이스 전환 문맥이다."
       ].join("\n"),
       input: [
         "아래 JSON 데이터를 바탕으로 블로그 초안을 작성해줘.",
@@ -783,13 +959,22 @@ async function createOpenAIBlogDraft({
         JSON.stringify(input, null, 2),
         "",
         "출력 형식:",
-        "1. 추천 블로그 제목 7개",
-        "2. 상위 블로그에서 발견한 공략 포인트 요약",
-        "3. 3000자 이상 블로그 본문 초안",
-        "4. 네이버 지도/스마트플레이스 방문 유도 문장 5개",
-        "5. 발행 전 체크리스트"
+        "1. 자동 추천 키워드 전략",
+        "- 메인 키워드",
+        "- 보조 키워드",
+        "- 연관 키워드",
+        "- 다음 추천 키워드",
+        "- 제목에 넣을 키워드",
+        "- 본문에 분산할 키워드",
+        "2. 상위 블로그를 이기는 글쓰기 방법",
+        "3. 다음 추천 키워드별 글감",
+        "4. 추천 블로그 제목 7개",
+        "5. 상위 블로그에서 발견한 공략 포인트 요약",
+        "6. 3000자 이상 완성형 블로그 본문",
+        "7. 네이버 지도/스마트플레이스 방문 유도 문장 5개",
+        "8. 발행 전 체크리스트"
       ].join("\n"),
-      max_output_tokens: 6000
+      max_output_tokens: 9000
     })
   });
 
@@ -821,7 +1006,8 @@ function createBlogDraft({
   localResults,
   blogScore,
   placeRankLabel,
-  blogRank
+  blogRank,
+  recommendedKeywords
 }) {
   const safeCategory = category || "업종";
   const topBlogTitles = blogResults
@@ -843,6 +1029,30 @@ function createBlogDraft({
 
   return [
     "[AI 자동 작성 블로그 초안]",
+    "",
+    "자동 추천 키워드",
+    recommendedKeywords
+      ? [
+          `- 메인: ${recommendedKeywords.primary.join(", ")}`,
+          `- 보조: ${recommendedKeywords.longTail.join(", ")}`,
+          `- 업체: ${recommendedKeywords.place.join(", ")}`,
+          `- 본문 문맥: ${recommendedKeywords.content.join(", ")}`,
+          `- 연관: ${recommendedKeywords.related.join(", ")}`,
+          `- 다음 추천: ${recommendedKeywords.next.join(", ")}`
+        ].join("\n")
+      : "- 추천 키워드 정보가 부족합니다.",
+    "",
+    "상위 블로그를 이기는 글쓰기 방법",
+    recommendedKeywords
+      ? recommendedKeywords.writingStrategy.map((item) => `- ${item}`).join("\n")
+      : "- 상위 글보다 더 상세한 시설, 상담, 비교, 방문 전 체크리스트를 넣으세요.",
+    "",
+    "다음 추천 키워드별 글감",
+    recommendedKeywords
+      ? recommendedKeywords.nextPlan
+          .map((item) => `- ${item.keyword}: ${item.reason} 글감은 ${item.contentAngle}`)
+          .join("\n")
+      : "- 다음 추천 키워드 정보가 부족합니다.",
     "",
     "추천 제목",
     ...titleIdeas.map((title, index) => `${index + 1}. ${title}`),
@@ -955,8 +1165,16 @@ app.post("/api/analyze", async (req, res, next) => {
           : ["플레이스 미노출"]),
       ...(blogRank ? ["블로그 검색 노출 확인"] : ["블로그 미노출"]),
       ...(blogAnalysis.checks.topTitleKeyword ? ["1위권 제목 키워드 확인"] : []),
-      ...(blogAnalysis.checks.richTopBlogContext ? ["상위 블로그 5개 분석"] : [])
+      ...(blogAnalysis.checks.richTopBlogContext ? ["상위 블로그 5개 분석"] : []),
+      ...(OPENAI_API_KEY ? ["OpenAI 자동작성 연결"] : ["OpenAI 키 미설정"])
     ];
+    const recommendedKeywords = buildRecommendedKeywords({
+      businessName,
+      keyword,
+      category,
+      blogResults,
+      localResults
+    });
     const prompt = createPrompt({
       businessName,
       keyword,
@@ -964,7 +1182,8 @@ app.post("/api/analyze", async (req, res, next) => {
       blogScore,
       placeRank,
       blogRank,
-      placeRankLabel: localAnalysis.placeRankLabel
+      placeRankLabel: localAnalysis.placeRankLabel,
+      recommendedKeywords
     });
     let draft = createBlogDraft({
       businessName,
@@ -974,9 +1193,11 @@ app.post("/api/analyze", async (req, res, next) => {
       localResults,
       blogScore,
       placeRankLabel: localAnalysis.placeRankLabel,
-      blogRank
+      blogRank,
+      recommendedKeywords
     });
     let draftSource = OPENAI_API_KEY ? "openai-fallback" : "built-in";
+    let openAIStatus = OPENAI_API_KEY ? "ready" : "missing-key";
 
     if (OPENAI_API_KEY) {
       try {
@@ -989,15 +1210,18 @@ app.post("/api/analyze", async (req, res, next) => {
           blogScore,
           placeRankLabel: localAnalysis.placeRankLabel,
           blogRank,
-          normalizedInput
+          normalizedInput,
+          recommendedKeywords
         });
 
         if (openAIDraft) {
           draft = openAIDraft;
           draftSource = "openai";
+          openAIStatus = "connected";
         }
       } catch (error) {
         console.error("OpenAI draft generation failed:", error.message);
+        openAIStatus = "failed";
       }
     }
 
@@ -1014,8 +1238,10 @@ app.post("/api/analyze", async (req, res, next) => {
       blogResults,
       blogSearchQueries: blogAnalysisResults.blogSearchQueries,
       actions,
+      recommendedKeywords,
       draft,
       draftSource,
+      openAIStatus,
       normalizedInput,
       topBlogAnalysis: {
         title: blogAnalysis.title,
