@@ -57,9 +57,12 @@ OPENAI_API_STYLE=responses
 OPENAI_RESPONSES_URL=
 OPENAI_CHAT_COMPLETIONS_URL=
 AI_DRAFT_REQUIRED=true
-AI_MAX_TOKENS=5200
-AI_CONTEXT_RESULT_LIMIT=3
-NAVER_REQUEST_DELAY_MS=90
+AI_FAIL_OPEN=true
+AI_MAX_TOKENS=7800
+AI_CONTEXT_RESULT_LIMIT=4
+AI_TARGET_MIN_CHARS=4500
+AI_TIMEOUT_MS=38000
+NAVER_REQUEST_DELAY_MS=70
 ```
 
 로컬에서 PowerShell을 사용할 경우 예시는 아래와 같습니다.
@@ -75,7 +78,7 @@ npm start
 
 `OPENAI_API_KEY`는 직접 OpenAI를 연결할 때 사용하는 값입니다. Cloudflare Worker 프록시를 쓸 경우에는 `OPENAI_API_KEY` 대신 `OPENAI_CHAT_COMPLETIONS_URL`을 넣으면 됩니다.
 
-속도를 줄이고 싶다면 Render 환경변수에 `OPENAI_MODEL=gpt-4o-mini`, `AI_MAX_TOKENS=5200`, `AI_CONTEXT_RESULT_LIMIT=3`을 넣어두면 됩니다. 원고는 3000자 이상을 유지하면서 너무 길게 늘어지지 않게 생성합니다.
+속도를 줄이면서도 글 품질을 유지하려면 Render 환경변수에 `OPENAI_MODEL=gpt-4o-mini`, `AI_MAX_TOKENS=7800`, `AI_CONTEXT_RESULT_LIMIT=4`, `AI_TARGET_MIN_CHARS=4500`을 넣어두면 됩니다.
 
 중요: OpenAI API 키도 네이버 API 키처럼 프론트엔드 HTML에 넣으면 안 됩니다. Render 서버의 Environment Variables에만 넣으세요.
 
@@ -116,9 +119,12 @@ Cloudflare Worker 같은 OpenAI 프록시 서버를 쓰는 경우에는 Render �
 OPENAI_CHAT_COMPLETIONS_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev
 OPENAI_API_STYLE=chat
 AI_DRAFT_REQUIRED=true
+AI_FAIL_OPEN=true
 OPENAI_MODEL=gpt-4o-mini
-AI_MAX_TOKENS=5200
-AI_CONTEXT_RESULT_LIMIT=3
+AI_MAX_TOKENS=7800
+AI_CONTEXT_RESULT_LIMIT=4
+AI_TARGET_MIN_CHARS=4500
+AI_TIMEOUT_MS=38000
 ```
 
 중요: `https://winter-resonance-93f1.qkdlgudrb.workers.dev` 주소는 아임웹 HTML의 `API_URL`에 넣는 주소가 아닙니다. 이 주소는 Render 서버가 AI 원고를 만들 때 내부에서 사용하는 주소입니다. 아임웹 HTML의 `API_URL`에는 반드시 Render 서버 주소를 넣으세요.
@@ -211,4 +217,7 @@ https://place-doctor-ai.onrender.com
 - 입력한 업체명, 키워드, 업종, 자동 추천 키워드, 상위 블로그 목록을 참고해 네이버 블로그 발행용 완성 원고를 자동 생성합니다.
 - 완성 원고는 전략 보고서가 아니라 `제목`, `본문`, `태그` 형태로 바로 복사해 올릴 수 있게 생성됩니다.
 - `AI_DRAFT_REQUIRED=true` 상태에서는 OpenAI 프록시 주소 또는 OpenAI API 키가 있어야 원고가 생성됩니다. AI 연결이 실패하면 기본 원고로 대체하지 않고 오류를 보여줍니다.
+- 블로그 원고는 일반 SEO가 아니라 네이버 플레이스 클릭, 체류시간, 전화문의, 방문예약, 회원등록 전환을 목표로 작성합니다.
+- 대표키워드는 본문에 8~12회, 업체명은 5회 이상 자연스럽게 삽입하고, 정보성 70%, 홍보성 30% 비율로 작성합니다.
+- 트리트라움 입력 시 AI운동솔루션, 프리미엄 머신 gym80, 요가·필라테스 통합 웰니스센터 차별점이 원고 작성 조건에 자동 반영됩니다.
 - 1등 가능성 점수는 플레이스 순위, 블로그 순위, 블로그 글 점수, 지역 검색 노출 여부를 합산한 추정 점수입니다.
