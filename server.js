@@ -561,9 +561,53 @@ async function analyzeLocalResults({ businessName, keyword, category, localDispl
   };
 }
 
+function getBusinessMatchTerms(businessName) {
+  const raw = String(businessName || "").trim();
+  const normalized = normalizeText(raw);
+  const commonWords = [
+    "피트니스",
+    "헬스장",
+    "헬스",
+    "pt",
+    "피티",
+    "필라테스",
+    "요가",
+    "센터",
+    "짐",
+    "지점",
+    "본점"
+  ];
+  const terms = [raw, normalized];
+  const spacedParts = raw
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  spacedParts.forEach((part) => {
+    const normalizedPart = normalizeText(part);
+    if (normalizedPart.length >= 2 && !commonWords.includes(normalizedPart)) {
+      terms.push(part);
+      terms.push(normalizedPart);
+    }
+  });
+
+  let withoutCommon = normalized;
+  commonWords.forEach((word) => {
+    withoutCommon = withoutCommon.replace(new RegExp(word, "g"), "");
+  });
+  if (withoutCommon.length >= 2) {
+    terms.push(withoutCommon);
+  }
+
+  return compactUnique(terms)
+    .map((term) => normalizeText(term))
+    .filter((term) => term.length >= 2);
+}
+
 function blogResultMatchesBusiness(item, businessName) {
   const content = `${item.title} ${item.description} ${item.bloggerName} ${item.link}`;
-  return containsNeedle(content, businessName);
+  const normalizedContent = normalizeText(content);
+  return getBusinessMatchTerms(businessName).some((term) => normalizedContent.includes(term));
 }
 
 function findBlogRankMatch(blogResults, businessName, primaryKeyword) {
@@ -628,10 +672,11 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
   const businessResults = searches
     .filter((search) => search.searchType === "business")
     .flatMap((search) => search.results);
-  const dedupedPrimaryKeywordResults = uniqueBy(
+  const allPrimaryKeywordResults = uniqueBy(
     primaryKeywordResults,
     (item) => item.link || `${item.title} ${item.bloggerName}`
-  ).slice(0, 10);
+  );
+  const dedupedPrimaryKeywordResults = allPrimaryKeywordResults.slice(0, 10);
   const dedupedKeywordResults = uniqueBy(
     keywordResults,
     (item) => item.link || `${item.title} ${item.bloggerName}`
@@ -640,7 +685,18 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     businessResults,
     (item) => item.link || `${item.title} ${item.bloggerName}`
   ).slice(0, 10);
-  const blogRankMatch = findBlogRankMatch(dedupedPrimaryKeywordResults, businessName, keyword);
+  const ownBlogResults = allPrimaryKeywordResults
+    .filter((item) => blogResultMatchesBusiness(item, businessName))
+    .map((item) => ({
+      rank: item.rank,
+      rankLabel: `${item.rank}위`,
+      title: item.title,
+      description: item.description,
+      bloggerName: item.bloggerName,
+      link: item.link,
+      searchQuery: item.searchQuery
+    }));
+  const blogRankMatch = ownBlogResults[0] || null;
   const variantBlogRankMatch = blogRankMatch
     ? null
     : findBlogRankMatch(
@@ -658,17 +714,8 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     blogRankLabel: blogRankMatch ? blogRankMatch.rankLabel : "미노출",
     blogRankSearchQuery: blogRankMatch ? blogRankMatch.searchQuery : "",
     blogRankBasis: `${keyword} 대표키워드 단독 검색 결과 최대 ${primaryDisplay}개 기준`,
-    ownBlogResult: blogRankMatch
-      ? {
-          rank: blogRankMatch.rank,
-          rankLabel: blogRankMatch.rankLabel,
-          title: blogRankMatch.title,
-          description: blogRankMatch.description,
-          bloggerName: blogRankMatch.bloggerName,
-          link: blogRankMatch.link,
-          searchQuery: blogRankMatch.searchQuery
-        }
-      : null,
+    ownBlogResult: blogRankMatch || null,
+    ownBlogResults,
     blogVariantRank: variantBlogRankMatch ? variantBlogRankMatch.rank : null,
     blogVariantRankLabel: variantBlogRankMatch ? variantBlogRankMatch.rankLabel : "",
     blogVariantRankSearchQuery: variantBlogRankMatch ? variantBlogRankMatch.searchQuery : "",
@@ -1500,12 +1547,16 @@ function createBlogDraft({
   blogScore,
   placeRankLabel,
   blogRank,
-  recommendedKeywords
+  recommendedKeywords,
+  selectedTitle,
+  selectedKeyword
 }) {
   const safeCategory = category || "업종";
-  const title = `${keyword} 찾는 분들이 ${businessName} 방문 전에 보면 좋은 체크포인트`;
+  const focusKeyword = selectedKeyword || keyword;
+  const title = selectedTitle || `${focusKeyword} 찾는 분들이 ${businessName} 방문 전에 보면 좋은 체크포인트`;
   const tagSource = recommendedKeywords
     ? compactUnique([
+        focusKeyword,
         ...recommendedKeywords.primary,
         ...recommendedKeywords.longTail,
         ...recommendedKeywords.place,
@@ -1748,6 +1799,7 @@ app.post("/api/analyze", async (req, res, next) => {
       blogRankSearchQuery: blogAnalysisResults.blogRankSearchQuery,
       blogRankBasis: blogAnalysisResults.blogRankBasis,
       ownBlogResult: blogAnalysisResults.ownBlogResult,
+      ownBlogResults: blogAnalysisResults.ownBlogResults,
       blogVariantRank: blogAnalysisResults.blogVariantRank,
       blogVariantRankLabel: blogAnalysisResults.blogVariantRankLabel,
       blogVariantRankSearchQuery: blogAnalysisResults.blogVariantRankSearchQuery,
@@ -1813,6 +1865,8 @@ app.post("/api/draft", async (req, res, next) => {
     const blogScore = Number(req.body.blogScore || 0);
     const blogRank = req.body.blogRank || null;
     const placeRankLabel = req.body.placeRankLabel || "";
+    const selectedTitle = String(req.body.selectedTitle || "").trim();
+    const selectedKeyword = String(req.body.selectedKeyword || "").trim();
     const recommendedKeywords =
       req.body.recommendedKeywords ||
       buildRecommendedKeywords({
@@ -1822,7 +1876,7 @@ app.post("/api/draft", async (req, res, next) => {
         blogResults,
         localResults
       });
-    const writingPrompt =
+    let writingPrompt =
       req.body.prompt ||
       createPrompt({
         businessName,
@@ -1835,6 +1889,21 @@ app.post("/api/draft", async (req, res, next) => {
         placeRankLabel,
         recommendedKeywords
       });
+    if (selectedTitle || selectedKeyword) {
+      writingPrompt += [
+        "",
+        "────────────────────",
+        "[사용자 선택값]",
+        selectedTitle ? `선택 제목: ${selectedTitle}` : "",
+        selectedKeyword ? `선택 핵심 키워드: ${selectedKeyword}` : "",
+        "",
+        "위 선택 제목과 선택 핵심 키워드를 반드시 반영해서 작성한다.",
+        "선택 제목은 최종 출력의 제목으로 사용한다.",
+        "선택 핵심 키워드는 본문 전체의 중심 키워드로 사용하고, 자연스럽게 반복한다."
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
 
     let draft = "";
     let draftSource = "";
@@ -1888,7 +1957,9 @@ app.post("/api/draft", async (req, res, next) => {
         blogScore,
         placeRankLabel,
         blogRank,
-        recommendedKeywords
+        recommendedKeywords,
+        selectedTitle,
+        selectedKeyword
       });
       draftSource = "built-in";
     }
