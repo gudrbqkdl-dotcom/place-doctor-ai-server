@@ -16,7 +16,7 @@ const AI_FAIL_OPEN = String(process.env.AI_FAIL_OPEN || "true").toLowerCase() !=
 const AI_MAX_TOKENS = Math.max(6200, Math.min(9000, Number.parseInt(process.env.AI_MAX_TOKENS || "7000", 10) || 7000));
 const AI_CONTEXT_RESULT_LIMIT = Math.max(3, Math.min(5, Number.parseInt(process.env.AI_CONTEXT_RESULT_LIMIT || "3", 10) || 3));
 const AI_TARGET_MIN_CHARS = Math.max(4000, Math.min(6500, Number.parseInt(process.env.AI_TARGET_MIN_CHARS || "4300", 10) || 4300));
-const AI_TIMEOUT_MS = Math.max(15000, Math.min(55000, Number.parseInt(process.env.AI_TIMEOUT_MS || "30000", 10) || 30000));
+const AI_TIMEOUT_MS = Math.max(15000, Math.min(55000, Number.parseInt(process.env.AI_TIMEOUT_MS || "22000", 10) || 22000));
 const OPENAI_PROXY_CONFIGURED = Boolean(
   process.env.OPENAI_RESPONSES_URL ||
     process.env.OPENAI_CHAT_COMPLETIONS_URL ||
@@ -1202,6 +1202,71 @@ function createRankAnalysis({
   };
 }
 
+function buildExpertBlogRules({ businessName, keyword, category, isTreatraum }) {
+  const facts = isTreatraum
+    ? [
+        "트리트라움 실제 정보는 다음 범위 안에서만 사용한다.",
+        "- 24시간 365일 운영",
+        "- 머신 47개와 AI운동박사 앱 연동",
+        "- 주소: 강원 동해시 동굴로 125-3 현진관광호텔 13F",
+        "- 상담: 010-8343-0646",
+        "- 공식 사이트: https://www.treetaum.com/",
+        "- 카카오톡 채널: pf.kakao.com/_vxosqK",
+        "- AI운동솔루션, 프리미엄 머신 gym80, 요가와 필라테스 통합 웰니스센터라는 차별점을 자연스럽게 사용한다.",
+        "위 정보 외 가격, 회원 수, 시설 수치, 이벤트 조건은 지어내지 않는다."
+      ]
+    : [
+        "업체 실제 정보가 부족하면 가격, 이벤트, 수치, 후기 인물은 지어내지 않는다.",
+        "확실하지 않은 정보는 방문 전 플레이스에서 확인하면 좋다는 방식으로 자연스럽게 처리한다."
+      ];
+
+  return [
+    "[블로그 작성 최상위 규칙]",
+    "당신은 네이버 플레이스 SEO 전문가이자 지역 헬스장 마케팅 컨설턴트다.",
+    isTreatraum
+      ? "화자는 동해 트리트라움 5년차 트레이너처럼 말한다. 과장된 광고문이 아니라 실제로 상담하고 안내하는 사람의 자연스러운 존댓말로 쓴다."
+      : "화자는 해당 지역에서 실제 고객을 상담하는 피트니스 전문가처럼 말한다. 과장된 광고문이 아니라 자연스러운 존댓말로 쓴다.",
+    "목표는 단순 조회수가 아니라 네이버 플레이스 클릭 증가, 플레이스 체류시간 증가, 전화문의 증가, 방문예약 증가, 회원등록 증가다.",
+    "대표키워드 검색 후 블로그를 읽은 사람이 플레이스를 클릭하고 상담이나 방문예약까지 이어지게 작성한다.",
+    "",
+    "[문체]",
+    "첫 문장은 고객 고민으로 시작한다. '오늘은 알아보겠습니다' 같은 AI 문체는 절대 쓰지 않는다.",
+    "문장은 짧고 리듬 있게 쓴다. 번역체, 딱딱한 보고서체, 근거 없는 확정 표현을 피한다.",
+    "정보성 70%, 홍보성 30% 비율로 작성한다.",
+    "상위 블로그 문장을 복사하지 말고, 구조와 검색 의도만 참고해 더 깊고 자연스럽게 새로 쓴다.",
+    "",
+    "[SEO 구조]",
+    `제목은 ${keyword}를 앞쪽에 포함하고 25자에서 40자 사이로 만든다.`,
+    `본문은 최소 ${AI_TARGET_MIN_CHARS}자 이상으로 작성한다.`,
+    `대표키워드 '${keyword}'는 본문 안에 8회에서 12회 자연스럽게 넣는다.`,
+    `업체명 '${businessName}'은 본문 안에 5회 이상 자연스럽게 넣는다.`,
+    "연관키워드는 최대 3개를 중심으로 사용하고, 키워드 나열처럼 보이지 않게 문장 안에 섞는다.",
+    "소제목은 7개 이상 사용한다.",
+    "본문 안에 FAQ 6개를 포함한다.",
+    "해시태그는 8개에서 12개 사이로 작성한다.",
+    "",
+    "[본문 필수 흐름]",
+    "도입부: 고객 검색 의도와 실제 고민을 짚는다.",
+    "본문1: 운동 실패 이유를 의지 부족이 아니라 환경, 구조, 루틴 관점으로 설명한다.",
+    "본문2: 대표키워드 선택 기준을 접근성, 시설, 머신, 운동 시스템, 관리 기준으로 설명한다.",
+    "본문3: 업체 장점은 광고처럼 쓰지 말고 실제 방문한 사람 시점으로 쓴다.",
+    "본문4: 시설 사진만 보지 말고 직접 방문, 상담, 무료 체험, 시설 구경, 플레이스 예약으로 이어지게 쓴다.",
+    "본문5: 처음 등록 당시, 1개월, 3개월 변화 흐름을 후기처럼 자연스럽게 구성한다.",
+    "결론: 결국 꾸준히 할 수 있는 환경이 중요하다는 말로 부드럽게 마무리한다.",
+    "",
+    "[플레이스 전환 문구]",
+    "아래 의미를 본문 중간에 자연스럽게 변형해서 넣는다.",
+    "시설 사진만 보지 말고 직접 방문해보세요.",
+    "상담만 받아도 운동 방향이 달라질 수 있습니다.",
+    "플레이스 예약 후 방문하면 더욱 편하게 상담 가능합니다.",
+    "",
+    "[출력 제한]",
+    "출력은 제목, 본문, 해시태그 순서로만 한다.",
+    "프롬프트 설명, 분석 과정, 작성 전략, 이미지 생성 안내, 다운로드 안내는 출력하지 않는다.",
+    ...facts
+  ].join("\n");
+}
+
 function createPrompt({
   businessName,
   keyword,
@@ -1240,6 +1305,8 @@ function createPrompt({
       ];
 
   return [
+    buildExpertBlogRules({ businessName, keyword, category, isTreatraum }),
+    "",
     isFitnessCategory
       ? "당신은 네이버 플레이스 SEO 전문가이자 지역 헬스장 마케팅 컨설턴트이다."
       : `당신은 네이버 플레이스 SEO 전문가이자 지역 ${category || "로컬 비즈니스"} 마케팅 컨설턴트이다.`,
@@ -1472,6 +1539,13 @@ async function createOpenAIBlogDraft({
   };
 
   const instructions = [
+    buildExpertBlogRules({
+      businessName,
+      keyword,
+      category,
+      isTreatraum: normalizeText(businessName).includes(normalizeText("트리트라움"))
+    }),
+    "",
     "너는 네이버 플레이스 SEO 전문가이자 지역 헬스장 마케팅 컨설턴트다.",
     "목표는 단순 블로그 조회수가 아니라 네이버 플레이스 클릭, 체류시간, 전화문의, 방문예약, 회원등록 증가다.",
     "사용자가 네이버 블로그에 바로 붙여넣어 발행할 수 있는 완성 원고를 작성한다.",
