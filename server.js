@@ -472,6 +472,7 @@ function mapBlogResults(items = [], options = {}) {
     rank: index + 1,
     rankLabel: String(index + 1),
     searchQuery: options.searchQuery || "",
+    searchType: options.searchType || "keyword",
     title: stripHtml(item.title),
     description: stripHtml(item.description),
     bloggerName: stripHtml(item.bloggername),
@@ -552,18 +553,34 @@ async function analyzeLocalResults({ businessName, keyword, category, localDispl
   };
 }
 
-function findBlogRank(blogResults, businessName, keyword) {
-  const match = blogResults.find((item) => {
-    const content = `${item.title} ${item.description} ${item.bloggerName}`;
-    return containsNeedle(content, businessName) || containsNeedle(content, keyword);
-  });
-  return match ? match.rank : null;
+function blogResultMatchesBusiness(item, businessName) {
+  const content = `${item.title} ${item.description} ${item.bloggerName} ${item.link}`;
+  return containsNeedle(content, businessName);
+}
+
+function findBlogRankMatch(blogResults, businessName, primaryKeyword) {
+  const match = blogResults.find((item) => blogResultMatchesBusiness(item, businessName));
+  if (!match) return null;
+
+  const primaryQueryMatch = normalizeText(match.searchQuery) === normalizeText(primaryKeyword);
+  return {
+    ...match,
+    rankLabel: primaryQueryMatch ? `${match.rank}위` : `보조키워드 ${match.rank}위`
+  };
 }
 
 async function analyzeBlogResults({ businessName, keyword, category, blogDisplay }) {
-  const keywordVariants = buildKeywordVariants({ keyword, category }).slice(0, 5);
+  const keywordVariants = buildKeywordVariants({ keyword, category }).slice(0, 6);
   const locations = extractLikelyLocations(keyword, category);
-  const queries = compactUnique([
+  const keywordQueries = compactUnique([
+    keyword,
+    ...keywordVariants,
+    `${keyword} 후기`,
+    `${keyword} 추천`,
+    `${keyword} 가격`,
+    `${keyword} 위치`
+  ]).slice(0, 7);
+  const businessQueries = compactUnique([
     `${businessName} ${keyword}`,
     `${businessName} ${keywordVariants[0] || keyword}`,
     ...locations.flatMap((location) => [
@@ -571,18 +588,17 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
       `${location} ${businessName}`,
       `${businessName} ${location} 후기`
     ]),
-    businessName,
-    ...keywordVariants,
-    `${keyword} 후기`,
-    `${keyword} 추천`,
-    `${keyword} 가격`,
-    `${keyword} 위치`
-  ]).slice(0, 9);
+    businessName
+  ]).slice(0, 6);
+  const queries = compactUnique([...keywordQueries, ...businessQueries]);
   const display = clampInteger(blogDisplay, 10, 1, 20);
 
   const searches = [];
   const searchErrors = [];
   for (const query of queries) {
+    const searchType = keywordQueries.some((keywordQuery) => normalizeText(keywordQuery) === normalizeText(query))
+      ? "keyword"
+      : "business";
     try {
       const data = await fetchNaverJson(NAVER_BLOG_URL, {
         query,
@@ -591,7 +607,11 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
         sort: "sim"
       });
 
-      searches.push(mapBlogResults(data.items, { searchQuery: query }));
+      searches.push({
+        query,
+        searchType,
+        results: mapBlogResults(data.items, { searchQuery: query, searchType })
+      });
     } catch (error) {
       searchErrors.push({ query, message: error.message, status: error.status });
       if (error.message.includes("NAVER_CLIENT_ID")) {
@@ -601,9 +621,35 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     await sleep(NAVER_REQUEST_DELAY_MS);
   }
 
+  const keywordResults = searches
+    .filter((search) => search.searchType === "keyword")
+    .flatMap((search) => search.results);
+  const businessResults = searches
+    .filter((search) => search.searchType === "business")
+    .flatMap((search) => search.results);
+  const dedupedKeywordResults = uniqueBy(
+    keywordResults,
+    (item) => item.link || `${item.title} ${item.bloggerName}`
+  ).slice(0, 10);
+  const dedupedBusinessResults = uniqueBy(
+    businessResults,
+    (item) => item.link || `${item.title} ${item.bloggerName}`
+  ).slice(0, 10);
+  const blogRankMatch = findBlogRankMatch(dedupedKeywordResults, businessName, keyword);
+  const businessBlogMatch =
+    blogRankMatch ||
+    dedupedBusinessResults.find((item) => blogResultMatchesBusiness(item, businessName));
+
   return {
-    blogResults: uniqueBy(searches.flat(), (item) => item.link || item.title).slice(0, 10),
+    blogRank: blogRankMatch ? blogRankMatch.rank : null,
+    blogRankLabel: blogRankMatch ? blogRankMatch.rankLabel : "미노출",
+    blogRankSearchQuery: blogRankMatch ? blogRankMatch.searchQuery : "",
+    blogFoundByName: Boolean(businessBlogMatch),
+    blogResults: dedupedKeywordResults,
+    businessBlogResults: dedupedBusinessResults,
     blogSearchQueries: queries,
+    blogKeywordSearchQueries: keywordQueries,
+    blogBusinessSearchQueries: businessQueries,
     blogSearchErrors: searchErrors
   };
 }
@@ -977,6 +1023,7 @@ function createPrompt({
   blogScore,
   placeRank,
   blogRank,
+  blogRankLabel,
   placeRankLabel,
   recommendedKeywords
 }) {
@@ -1019,7 +1066,7 @@ function createPrompt({
     `대표키워드: ${keyword}`,
     `업종: ${category || "미입력"}`,
     `현재 플레이스 순위: ${placeRank ? `${placeRank}위` : placeRankLabel || "미노출"}`,
-    `현재 블로그 순위: ${blogRank ? `${blogRank}위` : "미노출"}`,
+    `현재 블로그 순위: ${blogRank ? blogRankLabel || `${blogRank}위` : "미노출"}`,
     `현재 블로그 글 품질 점수: ${blogScore}점`,
     keywordText ? `\n자동 추천 키워드\n${keywordText}` : "",
     "",
@@ -1451,7 +1498,7 @@ app.post("/api/analyze", async (req, res, next) => {
     const localResults = localAnalysis.localResults;
     const blogResults = blogAnalysisResults.blogResults;
     const placeRank = localAnalysis.placeRank;
-    const blogRank = findBlogRank(blogResults, businessName, keyword);
+    const blogRank = blogAnalysisResults.blogRank;
     const blogAnalysis = calculateTopBlogScore({ blogResults, keyword, category });
     const blogScore = blogAnalysis.score;
     const totalScore = calculateTotalScore({
@@ -1476,7 +1523,11 @@ app.post("/api/analyze", async (req, res, next) => {
         : localAnalysis.placeFoundByName
           ? ["업체명 검색 확인", "키워드 5위권 밖"]
           : ["플레이스 미노출"]),
-      ...(blogRank ? ["블로그 검색 노출 확인"] : ["블로그 미노출"]),
+      ...(blogRank
+        ? ["대표키워드 블로그 노출 확인"]
+        : blogAnalysisResults.blogFoundByName
+          ? ["업체명 블로그 검색 확인", "대표키워드 블로그 미노출"]
+          : ["블로그 미노출"]),
       ...(blogAnalysis.checks.topTitleKeyword ? ["1위권 제목 키워드 확인"] : []),
       ...(blogAnalysis.checks.richTopBlogContext ? ["상위 블로그 5개 분석"] : []),
       ...(OPENAI_ENABLED ? ["AI 원고 작성 연결"] : ["AI 원고 작성 미설정"])
@@ -1495,6 +1546,7 @@ app.post("/api/analyze", async (req, res, next) => {
       blogScore,
       placeRank,
       blogRank,
+      blogRankLabel: blogAnalysisResults.blogRankLabel,
       placeRankLabel: localAnalysis.placeRankLabel,
       recommendedKeywords
     });
@@ -1561,6 +1613,9 @@ app.post("/api/analyze", async (req, res, next) => {
       placeRankLabel: localAnalysis.placeRankLabel,
       placeFoundByName: localAnalysis.placeFoundByName,
       blogRank,
+      blogRankLabel: blogAnalysisResults.blogRankLabel,
+      blogRankSearchQuery: blogAnalysisResults.blogRankSearchQuery,
+      blogFoundByName: blogAnalysisResults.blogFoundByName,
       blogScore,
       badges,
       localResults,
@@ -1568,6 +1623,9 @@ app.post("/api/analyze", async (req, res, next) => {
       localSearchErrors: localAnalysis.localSearchErrors,
       blogResults,
       blogSearchQueries: blogAnalysisResults.blogSearchQueries,
+      blogKeywordSearchQueries: blogAnalysisResults.blogKeywordSearchQueries,
+      blogBusinessSearchQueries: blogAnalysisResults.blogBusinessSearchQueries,
+      businessBlogResults: blogAnalysisResults.businessBlogResults,
       blogSearchErrors: blogAnalysisResults.blogSearchErrors,
       actions,
       recommendedKeywords,
