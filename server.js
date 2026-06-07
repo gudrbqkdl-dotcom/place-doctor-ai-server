@@ -1572,18 +1572,20 @@ app.post("/api/analyze", async (req, res, next) => {
       });
     }
 
-    const localAnalysis = await analyzeLocalResults({
-      businessName,
-      keyword,
-      category,
-      localDisplay: req.query.localDisplay
-    });
-    const blogAnalysisResults = await analyzeBlogResults({
-      businessName,
-      keyword,
-      category,
-      blogDisplay: req.query.blogDisplay
-    });
+    const [localAnalysis, blogAnalysisResults] = await Promise.all([
+      analyzeLocalResults({
+        businessName,
+        keyword,
+        category,
+        localDisplay: req.query.localDisplay
+      }),
+      analyzeBlogResults({
+        businessName,
+        keyword,
+        category,
+        blogDisplay: req.query.blogDisplay
+      })
+    ]);
 
     const localResults = localAnalysis.localResults;
     const blogResults = blogAnalysisResults.blogResults;
@@ -1653,12 +1655,15 @@ app.post("/api/analyze", async (req, res, next) => {
       placeRankLabel: localAnalysis.placeRankLabel,
       recommendedKeywords
     });
-    let draft = "";
-    let draftSource = "";
-    let openAIStatus = OPENAI_ENABLED ? "ready" : "missing-key";
+    const includeDraft = String(req.body.includeDraft || req.query.includeDraft || "false").toLowerCase() === "true";
+    let draft = includeDraft
+      ? ""
+      : "분석 결과가 먼저 표시되었습니다.\n\nAI 블로그 원고는 별도 요청으로 생성됩니다. 잠시만 기다리면 이 칸에 네이버 블로그 발행용 원고가 자동으로 들어옵니다.";
+    let draftSource = includeDraft ? "" : "pending";
+    let openAIStatus = includeDraft ? (OPENAI_ENABLED ? "ready" : "missing-key") : "pending";
     let openAIError = "";
 
-    if (!OPENAI_ENABLED && AI_DRAFT_REQUIRED && !AI_FAIL_OPEN) {
+    if (includeDraft && !OPENAI_ENABLED && AI_DRAFT_REQUIRED && !AI_FAIL_OPEN) {
       const error = new Error(
         "AI 블로그 작성 서버가 연결되지 않았습니다. Render 환경변수에 OPENAI_CHAT_COMPLETIONS_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev 와 OPENAI_API_STYLE=chat 을 넣어주세요."
       );
@@ -1666,9 +1671,38 @@ app.post("/api/analyze", async (req, res, next) => {
       throw error;
     }
 
-    try {
-      if (OPENAI_ENABLED) {
-        draft = await createOpenAIBlogDraft({
+    if (includeDraft) {
+      try {
+        if (OPENAI_ENABLED) {
+          draft = await createOpenAIBlogDraft({
+            businessName,
+            keyword,
+            category,
+            blogResults,
+            localResults,
+            blogScore,
+            placeRankLabel: localAnalysis.placeRankLabel,
+            blogRank,
+            normalizedInput,
+            recommendedKeywords,
+            writingPrompt: prompt
+          });
+          draftSource = "openai";
+          openAIStatus = "connected";
+        }
+      } catch (error) {
+        console.error("AI draft generation failed:", error.message);
+        openAIStatus = "failed";
+        openAIError = error.message;
+        if (AI_DRAFT_REQUIRED && !AI_FAIL_OPEN) {
+          error.status = error.status || 502;
+          error.message = `AI 블로그 원고 작성에 실패했습니다. Render의 OPENAI_CHAT_COMPLETIONS_URL, OPENAI_API_STYLE, OPENAI_MODEL 설정을 확인해주세요. 원인: ${error.message}`;
+          throw error;
+        }
+      }
+
+      if (!draft) {
+        draft = createBlogDraft({
           businessName,
           keyword,
           category,
@@ -1677,37 +1711,10 @@ app.post("/api/analyze", async (req, res, next) => {
           blogScore,
           placeRankLabel: localAnalysis.placeRankLabel,
           blogRank,
-          normalizedInput,
-          recommendedKeywords,
-          writingPrompt: prompt
+          recommendedKeywords
         });
-        draftSource = "openai";
-        openAIStatus = "connected";
+        draftSource = "built-in";
       }
-    } catch (error) {
-      console.error("AI draft generation failed:", error.message);
-      openAIStatus = "failed";
-      openAIError = error.message;
-      if (AI_DRAFT_REQUIRED && !AI_FAIL_OPEN) {
-        error.status = error.status || 502;
-        error.message = `AI 블로그 원고 작성에 실패했습니다. Render의 OPENAI_CHAT_COMPLETIONS_URL, OPENAI_API_STYLE, OPENAI_MODEL 설정을 확인해주세요. 원인: ${error.message}`;
-        throw error;
-      }
-    }
-
-    if (!draft) {
-      draft = createBlogDraft({
-        businessName,
-        keyword,
-        category,
-        blogResults,
-        localResults,
-        blogScore,
-        placeRankLabel: localAnalysis.placeRankLabel,
-        blogRank,
-        recommendedKeywords
-      });
-      draftSource = "built-in";
     }
 
     res.json({
@@ -1753,6 +1760,118 @@ app.post("/api/analyze", async (req, res, next) => {
         checks: blogAnalysis.checks
       },
       prompt
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/draft", async (req, res, next) => {
+  try {
+    const normalizedInput = normalizeAnalyzeInput({
+      businessName: req.body.businessName,
+      keyword: req.body.keyword,
+      category: req.body.category
+    });
+    const { businessName, keyword, category } = normalizedInput;
+
+    if (!businessName || !keyword) {
+      return res.status(400).json({
+        message: "businessName과 keyword는 필수 입력값입니다."
+      });
+    }
+
+    const localResults = Array.isArray(req.body.localResults) ? req.body.localResults.slice(0, 8) : [];
+    const blogResults = Array.isArray(req.body.blogResults) ? req.body.blogResults.slice(0, 8) : [];
+    const blogScore = Number(req.body.blogScore || 0);
+    const blogRank = req.body.blogRank || null;
+    const placeRankLabel = req.body.placeRankLabel || "";
+    const recommendedKeywords =
+      req.body.recommendedKeywords ||
+      buildRecommendedKeywords({
+        businessName,
+        keyword,
+        category,
+        blogResults,
+        localResults
+      });
+    const writingPrompt =
+      req.body.prompt ||
+      createPrompt({
+        businessName,
+        keyword,
+        category,
+        blogScore,
+        placeRank: req.body.placeRank || null,
+        blogRank,
+        blogRankLabel: req.body.blogRankLabel || "",
+        placeRankLabel,
+        recommendedKeywords
+      });
+
+    let draft = "";
+    let draftSource = "";
+    let openAIStatus = OPENAI_ENABLED ? "ready" : "missing-key";
+    let openAIError = "";
+
+    if (!OPENAI_ENABLED && AI_DRAFT_REQUIRED && !AI_FAIL_OPEN) {
+      const error = new Error(
+        "AI 블로그 작성 서버가 연결되지 않았습니다. Render 환경변수에 OPENAI_CHAT_COMPLETIONS_URL=https://winter-resonance-93f1.qkdlgudrb.workers.dev 와 OPENAI_API_STYLE=chat 을 넣어주세요."
+      );
+      error.status = 503;
+      throw error;
+    }
+
+    try {
+      if (OPENAI_ENABLED) {
+        draft = await createOpenAIBlogDraft({
+          businessName,
+          keyword,
+          category,
+          blogResults,
+          localResults,
+          blogScore,
+          placeRankLabel,
+          blogRank,
+          normalizedInput,
+          recommendedKeywords,
+          writingPrompt
+        });
+        draftSource = "openai";
+        openAIStatus = "connected";
+      }
+    } catch (error) {
+      console.error("AI draft generation failed:", error.message);
+      openAIStatus = "failed";
+      openAIError = error.message;
+      if (AI_DRAFT_REQUIRED && !AI_FAIL_OPEN) {
+        error.status = error.status || 502;
+        error.message = `AI 블로그 원고 작성에 실패했습니다. Render의 OPENAI_CHAT_COMPLETIONS_URL, OPENAI_API_STYLE, OPENAI_MODEL 설정을 확인해주세요. 원인: ${error.message}`;
+        throw error;
+      }
+    }
+
+    if (!draft) {
+      draft = createBlogDraft({
+        businessName,
+        keyword,
+        category,
+        blogResults,
+        localResults,
+        blogScore,
+        placeRankLabel,
+        blogRank,
+        recommendedKeywords
+      });
+      draftSource = "built-in";
+    }
+
+    res.json({
+      draft,
+      draftSource,
+      openAIStatus,
+      openAIError,
+      prompt: writingPrompt
     });
   } catch (error) {
     next(error);
