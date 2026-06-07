@@ -13,10 +13,10 @@ const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || `${OPENAI_API_B
 const OPENAI_CHAT_COMPLETIONS_URL = process.env.OPENAI_CHAT_COMPLETIONS_URL || `${OPENAI_API_BASE_URL}/chat/completions`;
 const AI_DRAFT_REQUIRED = String(process.env.AI_DRAFT_REQUIRED || "true").toLowerCase() !== "false";
 const AI_FAIL_OPEN = String(process.env.AI_FAIL_OPEN || "true").toLowerCase() !== "false";
-const AI_MAX_TOKENS = Math.max(6500, Math.min(9500, Number.parseInt(process.env.AI_MAX_TOKENS || "7800", 10) || 7800));
-const AI_CONTEXT_RESULT_LIMIT = Math.max(3, Math.min(5, Number.parseInt(process.env.AI_CONTEXT_RESULT_LIMIT || "4", 10) || 4));
-const AI_TARGET_MIN_CHARS = Math.max(3800, Math.min(6500, Number.parseInt(process.env.AI_TARGET_MIN_CHARS || "4500", 10) || 4500));
-const AI_TIMEOUT_MS = Math.max(15000, Math.min(55000, Number.parseInt(process.env.AI_TIMEOUT_MS || "38000", 10) || 38000));
+const AI_MAX_TOKENS = Math.max(6200, Math.min(9000, Number.parseInt(process.env.AI_MAX_TOKENS || "7000", 10) || 7000));
+const AI_CONTEXT_RESULT_LIMIT = Math.max(3, Math.min(5, Number.parseInt(process.env.AI_CONTEXT_RESULT_LIMIT || "3", 10) || 3));
+const AI_TARGET_MIN_CHARS = Math.max(4000, Math.min(6500, Number.parseInt(process.env.AI_TARGET_MIN_CHARS || "4300", 10) || 4300));
+const AI_TIMEOUT_MS = Math.max(15000, Math.min(55000, Number.parseInt(process.env.AI_TIMEOUT_MS || "30000", 10) || 30000));
 const OPENAI_PROXY_CONFIGURED = Boolean(
   process.env.OPENAI_RESPONSES_URL ||
     process.env.OPENAI_CHAT_COMPLETIONS_URL ||
@@ -1024,6 +1024,88 @@ function createActions({
   return actions.slice(0, 5);
 }
 
+function createRankAnalysis({
+  businessName,
+  keyword,
+  placeRank,
+  placeRankLabel,
+  placeFoundByName,
+  blogRank,
+  blogRankLabel,
+  blogScore,
+  blogFoundByName,
+  localResults,
+  blogResults
+}) {
+  const risks = [];
+  const nextActions = [];
+  const trackingMetrics = [
+    "플레이스 키워드 순위",
+    "실제 네이버 VIEW 노출 순서",
+    "블로그 API 기준 노출 여부",
+    "방문 예약/전화 문의 수",
+    "이번 주 신규 리뷰 수"
+  ];
+
+  const placeStatus = placeRank
+    ? `${placeRankLabel || `${placeRank}위`} 노출`
+    : placeFoundByName
+      ? "업체명 검색은 확인, 대표키워드 5위권 미노출"
+      : "대표키워드와 업체명 검색 모두 보강 필요";
+
+  const blogStatus = blogRank
+    ? `${blogRankLabel || `${blogRank}위`} 노출`
+    : blogFoundByName
+      ? "업체명 블로그는 확인, 대표키워드 노출 보강 필요"
+      : "대표키워드 블로그 노출 보강 필요";
+
+  if (!placeRank) {
+    risks.push("플레이스가 대표키워드 상위권에 잡히지 않으면 블로그에서 플레이스 클릭을 강하게 유도해야 합니다.");
+    nextActions.push(`${keyword} 검색자가 바로 확인할 수 있도록 글 중간과 하단에 네이버 지도/플레이스 확인 문장을 넣으세요.`);
+  } else if (placeRank > 3) {
+    risks.push("플레이스는 보이지만 상위 3개 업체와 비교하면 클릭률 경쟁이 필요합니다.");
+    nextActions.push("상위 플레이스의 카테고리, 업체명 문구, 리뷰 문맥을 비교해 스마트플레이스 정보를 보강하세요.");
+  } else {
+    nextActions.push("플레이스 상위 노출을 유지하기 위해 최신 후기형 블로그와 신규 리뷰를 꾸준히 쌓으세요.");
+  }
+
+  if (!blogRank) {
+    risks.push("네이버 공식 블로그 API 기준으로 업체명 포함 글이 대표키워드 결과에 잡히지 않습니다.");
+    nextActions.push(`${businessName}과 ${keyword}를 제목, 첫 문단, 소제목, 마무리 문장에 자연스럽게 배치한 4000자 이상 글을 발행하세요.`);
+  } else if (blogRank > 5) {
+    risks.push("블로그가 보이더라도 클릭을 가져오는 상위 구간은 아직 아닐 수 있습니다.");
+    nextActions.push("상위 블로그보다 사진 동선, 상담 기준, 초보자 질문, 실제 방문 후기를 더 구체적으로 보강하세요.");
+  } else {
+    nextActions.push("현재 블로그 노출 흐름을 유지하면서 같은 키워드의 후기형 보조 글을 추가 발행하세요.");
+  }
+
+  if (blogScore < 70) {
+    risks.push("상위 블로그 문맥 점수가 낮아 글 구조, 방문 의도, 플레이스 전환 문구 보강이 필요합니다.");
+    nextActions.push("후기, 추천, 가격, 시설, 위치, 리뷰, 초보, PT, 피티, 상담, 방문 문맥을 본문 안에 분산 배치하세요.");
+  }
+
+  const competitorCount = Array.isArray(localResults) ? localResults.length : 0;
+  const blogCount = Array.isArray(blogResults) ? blogResults.length : 0;
+  const level =
+    placeRank && placeRank <= 3 && blogRank && blogRank <= 5 && blogScore >= 75
+      ? "상위 유지 구간"
+      : placeRank || blogRank || blogScore >= 60
+        ? "상승 준비 구간"
+        : "초기 보강 구간";
+
+  return {
+    level,
+    summary: `${keyword} 기준 현재 상태는 ${level}입니다. 플레이스는 ${placeStatus}, 블로그는 ${blogStatus}입니다.`,
+    placeStatus,
+    blogStatus,
+    competitorCount,
+    blogCount,
+    risks: risks.slice(0, 4),
+    nextActions: nextActions.slice(0, 5),
+    trackingMetrics
+  };
+}
+
 function createPrompt({
   businessName,
   keyword,
@@ -1524,6 +1606,19 @@ app.post("/api/analyze", async (req, res, next) => {
       category,
       placeFoundByName: localAnalysis.placeFoundByName
     });
+    const rankAnalysis = createRankAnalysis({
+      businessName,
+      keyword,
+      placeRank,
+      placeRankLabel: localAnalysis.placeRankLabel,
+      placeFoundByName: localAnalysis.placeFoundByName,
+      blogRank,
+      blogRankLabel: blogAnalysisResults.blogRankLabel,
+      blogScore,
+      blogFoundByName: blogAnalysisResults.blogFoundByName,
+      localResults,
+      blogResults
+    });
     const badges = [
       ...(blogAnalysis.score >= 80 ? ["상위 블로그 문맥 우수"] : []),
       ...(placeRank
@@ -1626,8 +1721,16 @@ app.post("/api/analyze", async (req, res, next) => {
       blogFoundByName: blogAnalysisResults.blogFoundByName,
       naverViewUrl: createNaverSearchUrl(keyword, "view"),
       naverBlogUrl: createNaverSearchUrl(keyword, "blog"),
+      visibleBlogCheck: {
+        keyword,
+        viewUrl: createNaverSearchUrl(keyword, "view"),
+        blogUrl: createNaverSearchUrl(keyword, "blog"),
+        guide:
+          "실제 네이버 화면은 VIEW, 인기글, 스마트블록 구성에 따라 공식 API 순서와 다를 수 있습니다. 아래 링크로 실제 화면을 함께 확인하세요."
+      },
       blogScore,
       badges,
+      rankAnalysis,
       localResults,
       localSearchQueries: localAnalysis.localSearchQueries,
       localSearchErrors: localAnalysis.localSearchErrors,

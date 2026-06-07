@@ -19,6 +19,19 @@ place-doctor-ai-mvp/
 - 네이버 검색 데이터 수집과 분석은 Node 서버에서만 처리합니다.
 - 불법 크롤링이 아니라 네이버 공식 검색 API 기준으로 동작합니다.
 - 1등 가능성 점수는 네이버 공식 1등 점수가 아니라 공식 공개 기준 기반 추정 점수입니다.
+- 실제 네이버 VIEW, 인기글, 스마트블록 화면 순서는 공식 API와 다를 수 있으므로 화면에서 직접 확인 링크를 함께 제공합니다.
+- 리뷰 수는 네이버 공식 검색 API에서 직접 제공하지 않으므로, 화면의 리뷰 추적 기능에 직접 입력해 주간 변화를 관리합니다.
+
+## 현재 화면 기능
+
+- 순위분석: 플레이스 순위, 블로그 API 순위, 상위 블로그 점수를 보고 위험 신호와 다음 액션을 보여줍니다.
+- 순위추적: 분석할 때마다 이 브라우저에 순위 기록을 저장합니다.
+- 실제 블로그 확인: 네이버 VIEW와 블로그탭을 바로 열 수 있는 버튼을 제공합니다.
+- 실제 VIEW 순위 메모: 직접 확인한 실제 화면 순위를 저장할 수 있습니다.
+- 리뷰추적: 현재 리뷰 수, 목표 리뷰 수, 리뷰 메모를 저장합니다.
+- 경쟁 플레이스: 네이버 지역 검색 API 기준 상위 업체를 보여줍니다.
+- 공식 API 상위 블로그: 네이버 블로그 검색 API 기준 상위 블로그를 보여주고, 각 글을 바로 열 수 있습니다.
+- AI 블로그 원고: 프롬프트는 숨기고 네이버 블로그에 붙여넣을 완성 원고만 보여줍니다.
 
 ## 로컬 실행
 
@@ -58,10 +71,10 @@ OPENAI_RESPONSES_URL=
 OPENAI_CHAT_COMPLETIONS_URL=
 AI_DRAFT_REQUIRED=true
 AI_FAIL_OPEN=true
-AI_MAX_TOKENS=7800
-AI_CONTEXT_RESULT_LIMIT=4
-AI_TARGET_MIN_CHARS=4500
-AI_TIMEOUT_MS=38000
+AI_MAX_TOKENS=7000
+AI_CONTEXT_RESULT_LIMIT=3
+AI_TARGET_MIN_CHARS=4300
+AI_TIMEOUT_MS=30000
 NAVER_REQUEST_DELAY_MS=70
 ```
 
@@ -78,7 +91,7 @@ npm start
 
 `OPENAI_API_KEY`는 직접 OpenAI를 연결할 때 사용하는 값입니다. Cloudflare Worker 프록시를 쓸 경우에는 `OPENAI_API_KEY` 대신 `OPENAI_CHAT_COMPLETIONS_URL`을 넣으면 됩니다.
 
-속도를 줄이면서도 글 품질을 유지하려면 Render 환경변수에 `OPENAI_MODEL=gpt-4o-mini`, `AI_MAX_TOKENS=7800`, `AI_CONTEXT_RESULT_LIMIT=4`, `AI_TARGET_MIN_CHARS=4500`을 넣어두면 됩니다.
+속도를 줄이면서도 글 품질을 유지하려면 Render 환경변수에 `OPENAI_MODEL=gpt-4o-mini`, `AI_MAX_TOKENS=7000`, `AI_CONTEXT_RESULT_LIMIT=3`, `AI_TARGET_MIN_CHARS=4300`, `AI_TIMEOUT_MS=30000`을 넣어두면 됩니다.
 
 중요: OpenAI API 키도 네이버 API 키처럼 프론트엔드 HTML에 넣으면 안 됩니다. Render 서버의 Environment Variables에만 넣으세요.
 
@@ -121,10 +134,10 @@ OPENAI_API_STYLE=chat
 AI_DRAFT_REQUIRED=true
 AI_FAIL_OPEN=true
 OPENAI_MODEL=gpt-4o-mini
-AI_MAX_TOKENS=7800
-AI_CONTEXT_RESULT_LIMIT=4
-AI_TARGET_MIN_CHARS=4500
-AI_TIMEOUT_MS=38000
+AI_MAX_TOKENS=7000
+AI_CONTEXT_RESULT_LIMIT=3
+AI_TARGET_MIN_CHARS=4300
+AI_TIMEOUT_MS=30000
 ```
 
 중요: `https://winter-resonance-93f1.qkdlgudrb.workers.dev` 주소는 아임웹 HTML의 `API_URL`에 넣는 주소가 아닙니다. 이 주소는 Render 서버가 AI 원고를 만들 때 내부에서 사용하는 주소입니다. 아임웹 HTML의 `API_URL`에는 반드시 Render 서버 주소를 넣으세요.
@@ -191,6 +204,16 @@ https://place-doctor-ai.onrender.com
   "localResults": [],
   "blogResults": [],
   "actions": [],
+  "rankAnalysis": {
+    "level": "상승 준비 구간",
+    "summary": "현재 상태 요약",
+    "risks": [],
+    "nextActions": []
+  },
+  "visibleBlogCheck": {
+    "viewUrl": "https://search.naver.com/...",
+    "blogUrl": "https://search.naver.com/..."
+  },
   "recommendedKeywords": {
     "primary": [],
     "longTail": [],
