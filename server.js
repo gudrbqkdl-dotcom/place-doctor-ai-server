@@ -1479,6 +1479,7 @@ async function createOpenAIBlogDraft({
     "네이버 공식 1등 보장처럼 단정하지 말고, 실제 방문 후기처럼 자연스럽고 신뢰감 있게 작성한다.",
     "상위 블로그의 문장을 복사하지 말고 제목 구조, 정보 순서, 방문 의도, 지역 키워드 문맥만 참고한다.",
     "업체명과 키워드는 사용자가 입력한 값과 recommendedKeywords만 기준으로 삼는다. 다른 지역이나 이전 기본값을 섞지 않는다.",
+    "사용자가 선택한 추천 키워드가 있으면 그 키워드들을 중심으로 글 주제를 잡고, 제목은 AI가 새롭게 만든다. 미리 정해진 추천 제목을 그대로 쓰지 않는다.",
     `본문은 최소 ${AI_TARGET_MIN_CHARS}자 이상 작성한다. 3000자 근처에서 끝내지 말고 충분한 정보량을 확보한다.`,
     "대표키워드는 본문 안에 8~12회, 업체명은 5회 이상 자연스럽게 넣는다.",
     "소제목은 7개 이상 사용하고, 각 소제목 아래에는 실제 독자가 도움이 된다고 느낄 만큼 구체적인 설명을 넣는다.",
@@ -1576,14 +1577,24 @@ function createBlogDraft({
   placeRankLabel,
   blogRank,
   recommendedKeywords,
-  selectedTitle,
-  selectedKeyword
+  selectedKeywords
 }) {
   const safeCategory = category || "업종";
-  const focusKeyword = selectedKeyword || keyword;
-  const title = selectedTitle || `${focusKeyword} 찾는 분들이 ${businessName} 방문 전에 보면 좋은 체크포인트`;
+  const focusKeywords = Array.isArray(selectedKeywords) && selectedKeywords.length
+    ? selectedKeywords.slice(0, 3)
+    : [keyword];
+  const focusKeyword = focusKeywords[0] || keyword;
+  const titleOptions = [
+    `${focusKeyword} 찾는 분들이 ${businessName} 방문 전에 보면 좋은 체크포인트`,
+    `${focusKeyword} 등록 전 꼭 확인해야 하는 운동 환경 기준`,
+    `${focusKeyword} 처음 알아볼 때 실패하지 않는 선택 기준`,
+    `${focusKeyword} 운동 초보가 상담 전에 보면 좋은 현실적인 기준`,
+    `${focusKeyword} 시설보다 먼저 확인해야 할 방문 체크리스트`
+  ];
+  const title = titleOptions[Math.floor(Math.random() * titleOptions.length)];
   const tagSource = recommendedKeywords
     ? compactUnique([
+        ...focusKeywords,
         focusKeyword,
         ...recommendedKeywords.primary,
         ...recommendedKeywords.longTail,
@@ -1894,8 +1905,11 @@ app.post("/api/draft", async (req, res, next) => {
     const blogScore = Number(req.body.blogScore || 0);
     const blogRank = req.body.blogRank || null;
     const placeRankLabel = req.body.placeRankLabel || "";
-    const selectedTitle = String(req.body.selectedTitle || "").trim();
-    const selectedKeyword = String(req.body.selectedKeyword || "").trim();
+    const selectedKeywords = compactUnique(
+      Array.isArray(req.body.selectedKeywords)
+        ? req.body.selectedKeywords
+        : [req.body.selectedKeyword]
+    ).slice(0, 3);
     const recommendedKeywords =
       req.body.recommendedKeywords ||
       buildRecommendedKeywords({
@@ -1918,17 +1932,18 @@ app.post("/api/draft", async (req, res, next) => {
         placeRankLabel,
         recommendedKeywords
       });
-    if (selectedTitle || selectedKeyword) {
+    if (selectedKeywords.length) {
       writingPrompt += [
         "",
         "────────────────────",
         "[사용자 선택값]",
-        selectedTitle ? `선택 제목: ${selectedTitle}` : "",
-        selectedKeyword ? `선택 핵심 키워드: ${selectedKeyword}` : "",
+        `선택 핵심 키워드: ${selectedKeywords.join(", ")}`,
         "",
-        "위 선택 제목과 선택 핵심 키워드를 반드시 반영해서 작성한다.",
-        "선택 제목은 최종 출력의 제목으로 사용한다.",
-        "선택 핵심 키워드는 본문 전체의 중심 키워드로 사용하고, 자연스럽게 반복한다."
+        "추천 제목은 사용하지 않는다.",
+        "위 선택 핵심 키워드 최대 3개를 반드시 반영해서 작성한다.",
+        "최종 제목은 AI가 새롭게 만든다. 대표키워드를 포함하고, 선택 키워드 중 최소 1개를 자연스럽게 반영한다.",
+        "제목은 매번 같은 문장이 아니라 검색자가 클릭하고 싶은 새 주제로 만든다.",
+        "선택 키워드는 본문 전체의 중심 키워드로 사용하고, 자연스럽게 반복한다."
       ]
         .filter(Boolean)
         .join("\n");
@@ -1987,8 +2002,7 @@ app.post("/api/draft", async (req, res, next) => {
         placeRankLabel,
         blogRank,
         recommendedKeywords,
-        selectedTitle,
-        selectedKeyword
+        selectedKeywords
       });
       draftSource = "built-in";
     }
