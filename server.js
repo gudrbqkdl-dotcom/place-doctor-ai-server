@@ -103,6 +103,36 @@ function compactUnique(values) {
   );
 }
 
+function escapeRegex(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function removeTermsFromText(value = "", terms = []) {
+  let cleaned = String(value || "").trim();
+  compactUnique(terms)
+    .filter((term) => normalizeText(term).length >= 2)
+    .sort((a, b) => String(b).length - String(a).length)
+    .forEach((term) => {
+      cleaned = cleaned.replace(new RegExp(escapeRegex(term), "gi"), " ");
+    });
+
+  return cleaned.replace(/\s+/g, " ").trim();
+}
+
+function removeKeywordFromBusinessName(businessName = "", keyword = "", category = "") {
+  const raw = String(businessName || "").trim();
+  const keywordNoSpace = String(keyword || "").replace(/\s+/g, "");
+  const categoryNoSpace = String(category || "").replace(/\s+/g, "");
+  const cleaned = removeTermsFromText(raw, [
+    keyword,
+    keywordNoSpace,
+    category,
+    categoryNoSpace
+  ]);
+
+  return cleaned || raw;
+}
+
 function createNaverSearchUrl(query, where = "view") {
   const params = new URLSearchParams({
     where,
@@ -147,10 +177,18 @@ function normalizeAnalyzeInput({ businessName, keyword, category }) {
     }
   }
 
+  const fixedKeyword = fixCommonKeywordTypos(cleanKeyword);
+  const cleanCategory = rawCategory || "헬스장";
+  const finalBusinessName = removeKeywordFromBusinessName(
+    cleanBusinessName,
+    fixedKeyword,
+    cleanCategory
+  );
+
   return {
-    businessName: cleanBusinessName.trim(),
-    keyword: fixCommonKeywordTypos(cleanKeyword),
-    category: rawCategory || "헬스장",
+    businessName: finalBusinessName.trim(),
+    keyword: fixedKeyword,
+    category: cleanCategory,
     rawBusinessName,
     rawKeyword,
     rawCategory,
@@ -561,57 +599,83 @@ async function analyzeLocalResults({ businessName, keyword, category, localDispl
   };
 }
 
-function getBusinessMatchTerms(businessName) {
+function getBusinessMatchTerms(businessName, keyword = "", category = "") {
   const raw = String(businessName || "").trim();
-  const normalized = normalizeText(raw);
-  const commonWords = [
-    "피트니스",
-    "헬스장",
-    "헬스",
-    "pt",
-    "피티",
-    "필라테스",
-    "요가",
+  const regionTerms = GANGWON_REGIONS.flatMap((region) => region.aliases);
+  const noiseWords = compactUnique([
+    keyword,
+    String(keyword || "").replace(/\s+/g, ""),
+    category,
+    String(category || "").replace(/\s+/g, ""),
+    ...regionTerms,
+    ...COMMON_CATEGORY_TERMS,
     "센터",
     "짐",
     "지점",
-    "본점"
-  ];
-  const terms = [raw, normalized];
-  const spacedParts = raw
-    .split(/\s+/)
-    .map((part) => part.trim())
-    .filter(Boolean);
+    "본점",
+    "매장",
+    "가게",
+    "본사",
+    "점",
+    "FITNESS",
+    "GYM",
+    "PILATES"
+  ]);
+  const keywordCleaned = removeKeywordFromBusinessName(raw, keyword, category);
+  const brandOnly = removeTermsFromText(keywordCleaned, noiseWords) || keywordCleaned;
+  const sourceTexts = compactUnique([
+    brandOnly,
+    keywordCleaned,
+    removeTermsFromText(raw, noiseWords)
+  ]);
+  const blockedTerms = noiseWords
+    .map((word) => normalizeText(word))
+    .filter((word) => word.length >= 2);
+  const terms = [];
 
-  spacedParts.forEach((part) => {
-    const normalizedPart = normalizeText(part);
-    if (normalizedPart.length >= 2 && !commonWords.includes(normalizedPart)) {
-      terms.push(part);
-      terms.push(normalizedPart);
+  sourceTexts.forEach((sourceText) => {
+    const normalizedSource = normalizeText(sourceText);
+    if (normalizedSource.length >= 2) {
+      terms.push(sourceText);
+      terms.push(normalizedSource);
     }
-  });
 
-  let withoutCommon = normalized;
-  commonWords.forEach((word) => {
-    withoutCommon = withoutCommon.replace(new RegExp(word, "g"), "");
+    sourceText
+      .split(/\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .forEach((part) => {
+        const normalizedPart = normalizeText(part);
+        if (normalizedPart.length >= 2) {
+          terms.push(part);
+          terms.push(normalizedPart);
+        }
+      });
   });
-  if (withoutCommon.length >= 2) {
-    terms.push(withoutCommon);
-  }
 
   return compactUnique(terms)
     .map((term) => normalizeText(term))
-    .filter((term) => term.length >= 2);
+    .filter((term) => {
+      if (term.length < 2) return false;
+      return !blockedTerms.some(
+        (blocked) => term === blocked || (term.length <= blocked.length && blocked.includes(term))
+      );
+    });
 }
 
-function blogResultMatchesBusiness(item, businessName) {
+function blogResultMatchesBusiness(item, businessName, keyword = "", category = "") {
   const content = `${item.title} ${item.description} ${item.bloggerName} ${item.link}`;
   const normalizedContent = normalizeText(content);
-  return getBusinessMatchTerms(businessName).some((term) => normalizedContent.includes(term));
+  const matchTerms = getBusinessMatchTerms(businessName, keyword, category);
+
+  if (!matchTerms.length) return false;
+  return matchTerms.some((term) => normalizedContent.includes(term));
 }
 
-function findBlogRankMatch(blogResults, businessName, primaryKeyword) {
-  const match = blogResults.find((item) => blogResultMatchesBusiness(item, businessName));
+function findBlogRankMatch(blogResults, businessName, primaryKeyword, category = "") {
+  const match = blogResults.find((item) =>
+    blogResultMatchesBusiness(item, businessName, primaryKeyword, category)
+  );
   if (!match) return null;
 
   const primaryQueryMatch = normalizeText(match.searchQuery) === normalizeText(primaryKeyword);
@@ -622,37 +686,25 @@ function findBlogRankMatch(blogResults, businessName, primaryKeyword) {
 }
 
 async function analyzeBlogResults({ businessName, keyword, category, blogDisplay }) {
-  const keywordVariants = buildKeywordVariants({ keyword, category }).slice(0, 4);
-  const locations = extractLikelyLocations(keyword, category);
-  const keywordQueries = [keyword];
-  const businessQueries = compactUnique([
-    `${businessName} ${keyword}`,
-    `${businessName} ${keywordVariants[0] || keyword}`,
-    ...locations.flatMap((location) => [`${businessName} ${location}`, `${location} ${businessName}`]),
-    businessName
-  ]).slice(0, 4);
-  const queries = compactUnique([...keywordQueries, ...businessQueries]);
+  const keywordQueries = compactUnique([keyword]).slice(0, 1);
+  const queries = keywordQueries;
   const primaryDisplay = clampInteger(blogDisplay, 100, 10, 100);
-  const businessDisplay = 10;
 
   const searches = [];
   const searchErrors = [];
   for (const query of queries) {
-    const searchType = keywordQueries.some((keywordQuery) => normalizeText(keywordQuery) === normalizeText(query))
-      ? "keyword"
-      : "business";
     try {
       const data = await fetchNaverJson(NAVER_BLOG_URL, {
         query,
-        display: searchType === "keyword" ? primaryDisplay : businessDisplay,
+        display: primaryDisplay,
         start: 1,
         sort: "sim"
       });
 
       searches.push({
         query,
-        searchType,
-        results: mapBlogResults(data.items, { searchQuery: query, searchType })
+        searchType: "keyword",
+        results: mapBlogResults(data.items, { searchQuery: query, searchType: "keyword" })
       });
     } catch (error) {
       searchErrors.push({ query, message: error.message, status: error.status });
@@ -660,33 +712,19 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
         throw error;
       }
     }
-    await sleep(NAVER_REQUEST_DELAY_MS);
   }
 
-  const keywordResults = searches
-    .filter((search) => search.searchType === "keyword")
-    .flatMap((search) => search.results);
+  const keywordResults = searches.flatMap((search) => search.results);
   const primaryKeywordResults = keywordResults.filter(
     (item) => normalizeText(item.searchQuery) === normalizeText(keyword)
   );
-  const businessResults = searches
-    .filter((search) => search.searchType === "business")
-    .flatMap((search) => search.results);
   const allPrimaryKeywordResults = uniqueBy(
     primaryKeywordResults,
     (item) => item.link || `${item.title} ${item.bloggerName}`
   );
   const dedupedPrimaryKeywordResults = allPrimaryKeywordResults.slice(0, 10);
-  const dedupedKeywordResults = uniqueBy(
-    keywordResults,
-    (item) => item.link || `${item.title} ${item.bloggerName}`
-  ).slice(0, 10);
-  const dedupedBusinessResults = uniqueBy(
-    businessResults,
-    (item) => item.link || `${item.title} ${item.bloggerName}`
-  ).slice(0, 10);
   const ownBlogResults = allPrimaryKeywordResults
-    .filter((item) => blogResultMatchesBusiness(item, businessName))
+    .filter((item) => blogResultMatchesBusiness(item, businessName, keyword, category))
     .map((item) => ({
       rank: item.rank,
       rankLabel: `${item.rank}위`,
@@ -697,17 +735,6 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
       searchQuery: item.searchQuery
     }));
   const blogRankMatch = ownBlogResults[0] || null;
-  const variantBlogRankMatch = blogRankMatch
-    ? null
-    : findBlogRankMatch(
-        dedupedKeywordResults.filter((item) => normalizeText(item.searchQuery) !== normalizeText(keyword)),
-        businessName,
-        keyword
-      );
-  const businessBlogMatch =
-    blogRankMatch ||
-    variantBlogRankMatch ||
-    dedupedBusinessResults.find((item) => blogResultMatchesBusiness(item, businessName));
 
   return {
     blogRank: blogRankMatch ? blogRankMatch.rank : null,
@@ -716,16 +743,16 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     blogRankBasis: `${keyword} 대표키워드 단독 검색 결과 최대 ${primaryDisplay}개 기준`,
     ownBlogResult: blogRankMatch || null,
     ownBlogResults,
-    blogVariantRank: variantBlogRankMatch ? variantBlogRankMatch.rank : null,
-    blogVariantRankLabel: variantBlogRankMatch ? variantBlogRankMatch.rankLabel : "",
-    blogVariantRankSearchQuery: variantBlogRankMatch ? variantBlogRankMatch.searchQuery : "",
-    blogFoundByName: Boolean(businessBlogMatch),
+    blogVariantRank: null,
+    blogVariantRankLabel: "",
+    blogVariantRankSearchQuery: "",
+    blogFoundByName: Boolean(blogRankMatch),
     blogResults: dedupedPrimaryKeywordResults,
-    blogContextResults: dedupedKeywordResults,
-    businessBlogResults: dedupedBusinessResults,
+    blogContextResults: dedupedPrimaryKeywordResults,
+    businessBlogResults: [],
     blogSearchQueries: queries,
     blogKeywordSearchQueries: keywordQueries,
-    blogBusinessSearchQueries: businessQueries,
+    blogBusinessSearchQueries: [],
     blogSearchErrors: searchErrors
   };
 }
