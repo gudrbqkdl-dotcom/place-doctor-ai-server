@@ -103,6 +103,14 @@ function compactUnique(values) {
   );
 }
 
+function createNaverSearchUrl(query, where = "view") {
+  const params = new URLSearchParams({
+    where,
+    query: String(query || "").trim()
+  });
+  return `https://search.naver.com/search.naver?${params.toString()}`;
+}
+
 function fixCommonKeywordTypos(value = "") {
   return String(value)
     .replace(/동핼/g, "동해")
@@ -1524,9 +1532,9 @@ app.post("/api/analyze", async (req, res, next) => {
           ? ["업체명 검색 확인", "키워드 5위권 밖"]
           : ["플레이스 미노출"]),
       ...(blogRank
-        ? ["대표키워드 블로그 노출 확인"]
+        ? ["공식 API 블로그 노출 확인"]
         : blogAnalysisResults.blogFoundByName
-          ? ["업체명 블로그 검색 확인", "대표키워드 블로그 미노출"]
+          ? ["업체명 블로그 검색 확인", "공식 API 대표키워드 미노출"]
           : ["블로그 미노출"]),
       ...(blogAnalysis.checks.topTitleKeyword ? ["1위권 제목 키워드 확인"] : []),
       ...(blogAnalysis.checks.richTopBlogContext ? ["상위 블로그 5개 분석"] : []),
@@ -1616,6 +1624,8 @@ app.post("/api/analyze", async (req, res, next) => {
       blogRankLabel: blogAnalysisResults.blogRankLabel,
       blogRankSearchQuery: blogAnalysisResults.blogRankSearchQuery,
       blogFoundByName: blogAnalysisResults.blogFoundByName,
+      naverViewUrl: createNaverSearchUrl(keyword, "view"),
+      naverBlogUrl: createNaverSearchUrl(keyword, "blog"),
       blogScore,
       badges,
       localResults,
