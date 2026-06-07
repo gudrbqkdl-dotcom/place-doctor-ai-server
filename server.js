@@ -632,9 +632,16 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
   const keywordResults = searches
     .filter((search) => search.searchType === "keyword")
     .flatMap((search) => search.results);
+  const primaryKeywordResults = keywordResults.filter(
+    (item) => normalizeText(item.searchQuery) === normalizeText(keyword)
+  );
   const businessResults = searches
     .filter((search) => search.searchType === "business")
     .flatMap((search) => search.results);
+  const dedupedPrimaryKeywordResults = uniqueBy(
+    primaryKeywordResults,
+    (item) => item.link || `${item.title} ${item.bloggerName}`
+  ).slice(0, 10);
   const dedupedKeywordResults = uniqueBy(
     keywordResults,
     (item) => item.link || `${item.title} ${item.bloggerName}`
@@ -643,17 +650,29 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     businessResults,
     (item) => item.link || `${item.title} ${item.bloggerName}`
   ).slice(0, 10);
-  const blogRankMatch = findBlogRankMatch(dedupedKeywordResults, businessName, keyword);
+  const blogRankMatch = findBlogRankMatch(dedupedPrimaryKeywordResults, businessName, keyword);
+  const variantBlogRankMatch = blogRankMatch
+    ? null
+    : findBlogRankMatch(
+        dedupedKeywordResults.filter((item) => normalizeText(item.searchQuery) !== normalizeText(keyword)),
+        businessName,
+        keyword
+      );
   const businessBlogMatch =
     blogRankMatch ||
+    variantBlogRankMatch ||
     dedupedBusinessResults.find((item) => blogResultMatchesBusiness(item, businessName));
 
   return {
     blogRank: blogRankMatch ? blogRankMatch.rank : null,
     blogRankLabel: blogRankMatch ? blogRankMatch.rankLabel : "미노출",
     blogRankSearchQuery: blogRankMatch ? blogRankMatch.searchQuery : "",
+    blogVariantRank: variantBlogRankMatch ? variantBlogRankMatch.rank : null,
+    blogVariantRankLabel: variantBlogRankMatch ? variantBlogRankMatch.rankLabel : "",
+    blogVariantRankSearchQuery: variantBlogRankMatch ? variantBlogRankMatch.searchQuery : "",
     blogFoundByName: Boolean(businessBlogMatch),
-    blogResults: dedupedKeywordResults,
+    blogResults: dedupedPrimaryKeywordResults,
+    blogContextResults: dedupedKeywordResults,
     businessBlogResults: dedupedBusinessResults,
     blogSearchQueries: queries,
     blogKeywordSearchQueries: keywordQueries,
@@ -1725,6 +1744,9 @@ app.post("/api/analyze", async (req, res, next) => {
       blogRank,
       blogRankLabel: blogAnalysisResults.blogRankLabel,
       blogRankSearchQuery: blogAnalysisResults.blogRankSearchQuery,
+      blogVariantRank: blogAnalysisResults.blogVariantRank,
+      blogVariantRankLabel: blogAnalysisResults.blogVariantRankLabel,
+      blogVariantRankSearchQuery: blogAnalysisResults.blogVariantRankSearchQuery,
       blogFoundByName: blogAnalysisResults.blogFoundByName,
       naverViewUrl: createNaverSearchUrl(keyword, "view"),
       naverBlogUrl: createNaverSearchUrl(keyword, "blog"),
@@ -1742,6 +1764,7 @@ app.post("/api/analyze", async (req, res, next) => {
       localSearchQueries: localAnalysis.localSearchQueries,
       localSearchErrors: localAnalysis.localSearchErrors,
       blogResults,
+      blogContextResults: blogAnalysisResults.blogContextResults,
       blogSearchQueries: blogAnalysisResults.blogSearchQueries,
       blogKeywordSearchQueries: blogAnalysisResults.blogKeywordSearchQueries,
       blogBusinessSearchQueries: blogAnalysisResults.blogBusinessSearchQueries,
