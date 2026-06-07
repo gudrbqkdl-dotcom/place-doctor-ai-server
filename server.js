@@ -578,28 +578,18 @@ function findBlogRankMatch(blogResults, businessName, primaryKeyword) {
 }
 
 async function analyzeBlogResults({ businessName, keyword, category, blogDisplay }) {
-  const keywordVariants = buildKeywordVariants({ keyword, category }).slice(0, 6);
+  const keywordVariants = buildKeywordVariants({ keyword, category }).slice(0, 4);
   const locations = extractLikelyLocations(keyword, category);
-  const keywordQueries = compactUnique([
-    keyword,
-    ...keywordVariants,
-    `${keyword} 후기`,
-    `${keyword} 추천`,
-    `${keyword} 가격`,
-    `${keyword} 위치`
-  ]).slice(0, 7);
+  const keywordQueries = [keyword];
   const businessQueries = compactUnique([
     `${businessName} ${keyword}`,
     `${businessName} ${keywordVariants[0] || keyword}`,
-    ...locations.flatMap((location) => [
-      `${businessName} ${location}`,
-      `${location} ${businessName}`,
-      `${businessName} ${location} 후기`
-    ]),
+    ...locations.flatMap((location) => [`${businessName} ${location}`, `${location} ${businessName}`]),
     businessName
-  ]).slice(0, 6);
+  ]).slice(0, 4);
   const queries = compactUnique([...keywordQueries, ...businessQueries]);
-  const display = clampInteger(blogDisplay, 10, 1, 20);
+  const primaryDisplay = clampInteger(blogDisplay, 100, 10, 100);
+  const businessDisplay = 10;
 
   const searches = [];
   const searchErrors = [];
@@ -610,7 +600,7 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     try {
       const data = await fetchNaverJson(NAVER_BLOG_URL, {
         query,
-        display,
+        display: searchType === "keyword" ? primaryDisplay : businessDisplay,
         start: 1,
         sort: "sim"
       });
@@ -667,6 +657,18 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     blogRank: blogRankMatch ? blogRankMatch.rank : null,
     blogRankLabel: blogRankMatch ? blogRankMatch.rankLabel : "미노출",
     blogRankSearchQuery: blogRankMatch ? blogRankMatch.searchQuery : "",
+    blogRankBasis: `${keyword} 대표키워드 단독 검색 결과 최대 ${primaryDisplay}개 기준`,
+    ownBlogResult: blogRankMatch
+      ? {
+          rank: blogRankMatch.rank,
+          rankLabel: blogRankMatch.rankLabel,
+          title: blogRankMatch.title,
+          description: blogRankMatch.description,
+          bloggerName: blogRankMatch.bloggerName,
+          link: blogRankMatch.link,
+          searchQuery: blogRankMatch.searchQuery
+        }
+      : null,
     blogVariantRank: variantBlogRankMatch ? variantBlogRankMatch.rank : null,
     blogVariantRankLabel: variantBlogRankMatch ? variantBlogRankMatch.rankLabel : "",
     blogVariantRankSearchQuery: variantBlogRankMatch ? variantBlogRankMatch.searchQuery : "",
@@ -1744,6 +1746,8 @@ app.post("/api/analyze", async (req, res, next) => {
       blogRank,
       blogRankLabel: blogAnalysisResults.blogRankLabel,
       blogRankSearchQuery: blogAnalysisResults.blogRankSearchQuery,
+      blogRankBasis: blogAnalysisResults.blogRankBasis,
+      ownBlogResult: blogAnalysisResults.ownBlogResult,
       blogVariantRank: blogAnalysisResults.blogVariantRank,
       blogVariantRankLabel: blogAnalysisResults.blogVariantRankLabel,
       blogVariantRankSearchQuery: blogAnalysisResults.blogVariantRankSearchQuery,
