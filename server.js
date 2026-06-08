@@ -1261,6 +1261,14 @@ function buildExpertBlogRules({ businessName, keyword, category, isTreatraum }) 
     "플레이스 예약 후 방문하면 더욱 편하게 상담 가능합니다.",
     "",
     "[출력 제한]",
+    "네이버 블로그에 바로 붙여넣을 수 있는 일반 텍스트로만 작성한다.",
+    "마크다운 문법을 절대 쓰지 않는다. ##, ###, **, -, ``` 같은 기호를 사용하지 않는다.",
+    "소제목은 '1. 운동 실패 이유는 의지보다 환경입니다'처럼 일반 문장으로 쓴다.",
+    "본문 중간중간 사진이 필요한 위치에는 빈 줄을 두고 '[사진을 넣어주세요: 헬스장 입구 또는 외관 사진]'처럼 표시한다.",
+    "사진 안내 문구는 본문 안에 최소 5개 넣는다. 외관, 시설 내부, 대표 머신, 상담 공간, 네이버 플레이스 예약 화면을 각각 넣을 위치를 표시한다.",
+    "본문 중간에 짧은 인용구형 강조 문장을 3개 넣는다.",
+    "인용구는 “운동을 오래 못 한 이유는 의지가 약해서가 아니라, 나에게 맞는 환경을 아직 못 찾았기 때문일 수 있습니다.”처럼 큰따옴표 문장으로만 쓴다.",
+    "인용구에 >, ##, ** 같은 마크다운 기호를 절대 쓰지 않는다.",
     "출력은 제목, 본문, 해시태그 순서로만 한다.",
     "프롬프트 설명, 분석 과정, 작성 전략, 이미지 생성 안내, 다운로드 안내는 출력하지 않는다.",
     ...facts
@@ -1435,6 +1443,73 @@ function extractOpenAIText(data) {
   return directText ? directText.trim() : "";
 }
 
+function cleanBlogDraftForPublishing(rawDraft) {
+  let draft = String(rawDraft || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/^\s{0,3}#{1,6}\s*/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (!draft) return draft;
+
+  const hasQuoteLine = /[“"][^”"\n]{18,}[”"]/.test(draft);
+  if (!hasQuoteLine) {
+    const quoteMarkers = [
+      "“운동을 오래 못 한 이유는 의지가 약해서가 아니라, 나에게 맞는 환경을 아직 못 찾았기 때문일 수 있습니다.”",
+      "“시설 사진보다 중요한 것은 내가 실제로 오래 다닐 수 있는 동선과 분위기인지 확인하는 것입니다.”",
+      "“상담만 받아도 지금 내 몸에 맞는 운동 방향이 훨씬 선명해질 수 있습니다.”"
+    ];
+    const quoteLines = draft.split("\n");
+    const quoteBodyIndex = quoteLines.findIndex((line) => /^본문\s*[:：]\s*$/.test(line.trim()));
+    const firstQuoteAt = quoteBodyIndex >= 0 ? Math.min(quoteBodyIndex + 4, quoteLines.length) : Math.min(5, quoteLines.length);
+    quoteLines.splice(firstQuoteAt, 0, "", quoteMarkers[0], "");
+
+    const quoteSectionPatterns = [/^3[.)]\s*/, /^5[.)]\s*/];
+    let quoteSearchFrom = firstQuoteAt + 1;
+    quoteSectionPatterns.forEach((pattern, markerIndex) => {
+      const foundIndex = quoteLines.findIndex((line, index) => index > quoteSearchFrom && pattern.test(line.trim()));
+      if (foundIndex >= 0) {
+        quoteLines.splice(foundIndex, 0, "", quoteMarkers[markerIndex + 1], "");
+        quoteSearchFrom = foundIndex + 3;
+      }
+    });
+
+    draft = quoteLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  const hasPhotoMarker = /\[?\s*사진을\s*넣어주세요/i.test(draft);
+  if (hasPhotoMarker) return draft;
+
+  const photoMarkers = [
+    "[사진을 넣어주세요: 헬스장 입구 또는 외관 사진]",
+    "[사진을 넣어주세요: 시설 내부와 전체 운동 동선 사진]",
+    "[사진을 넣어주세요: 대표 머신 또는 프리미엄 기구 사진]",
+    "[사진을 넣어주세요: 상담 공간 또는 무료 체험 안내 사진]",
+    "[사진을 넣어주세요: 네이버 플레이스 예약 화면 또는 지도 위치 캡처]"
+  ];
+
+  const lines = draft.split("\n");
+  const bodyIndex = lines.findIndex((line) => /^본문\s*[:：]\s*$/.test(line.trim()));
+  const insertAt = bodyIndex >= 0 ? Math.min(bodyIndex + 2, lines.length) : Math.min(3, lines.length);
+  lines.splice(insertAt, 0, "", photoMarkers[0], "");
+
+  const sectionPatterns = [/^2[.)]\s*/, /^3[.)]\s*/, /^4[.)]\s*/, /^7[.)]\s*|^결론/];
+  let searchFrom = insertAt + 1;
+  sectionPatterns.forEach((pattern, markerIndex) => {
+    const foundIndex = lines.findIndex((line, index) => index > searchFrom && pattern.test(line.trim()));
+    if (foundIndex >= 0) {
+      lines.splice(foundIndex, 0, "", photoMarkers[markerIndex + 1], "");
+      searchFrom = foundIndex + 3;
+    }
+  });
+
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 async function postOpenAI(url, body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
@@ -1560,6 +1635,14 @@ async function createOpenAIBlogDraft({
     "왜 운동에 실패하는지, 선택 기준, 업체 장점, 플레이스 방문 유도, 회원 변화 사례, 결론 흐름을 반드시 포함한다.",
     "시설, 접근성, 머신, 운동 시스템, 관리, 상담, 무료 체험, 시설 구경, 초보자 관점, PT/피티, 운동 루틴, 방문 전 체크, 네이버 지도 확인 흐름을 모두 자연스럽게 포함한다.",
     "정보성 70%, 홍보성 30% 비율을 유지한다.",
+    "네이버 블로그에 바로 붙여넣을 수 있는 일반 텍스트로만 작성한다.",
+    "마크다운 문법을 절대 쓰지 않는다. ##, ###, **, -, ``` 같은 기호를 사용하지 않는다.",
+    "소제목은 '1. 운동 실패 이유는 의지보다 환경입니다'처럼 숫자와 일반 문장으로 쓴다.",
+    "본문 중간중간 사진이 필요한 위치에는 빈 줄을 두고 '[사진을 넣어주세요: 헬스장 입구 또는 외관 사진]'처럼 표시한다.",
+    "사진 안내 문구는 본문 안에 최소 5개 넣는다. 외관, 시설 내부, 대표 머신, 상담 공간, 네이버 플레이스 예약 화면을 각각 넣을 위치를 표시한다.",
+    "본문 중간에 짧은 인용구형 강조 문장을 3개 넣는다.",
+    "인용구는 “시설 사진보다 중요한 것은 내가 오래 다닐 수 있는 환경인지 확인하는 것입니다.”처럼 큰따옴표 문장으로만 쓴다.",
+    "인용구에 >, ##, ** 같은 마크다운 기호를 절대 쓰지 않는다.",
     "출력에는 분석 과정, 전략 설명, 키워드 목록 해설, 다음 추천 키워드 설명을 넣지 않는다.",
     "반드시 제목, 본문, 해시태그만 출력한다."
   ].join("\n");
@@ -1587,12 +1670,13 @@ async function createOpenAIBlogDraft({
   const fullPrompt = `${instructions}\n\n${userPrompt}`;
 
   if (!useChatCompletions) {
-    return postOpenAI(openAIUrl, {
+    const draft = await postOpenAI(openAIUrl, {
       model: OPENAI_MODEL,
       instructions,
       input: userPrompt,
       max_output_tokens: AI_MAX_TOKENS
     });
+    return cleanBlogDraftForPublishing(draft);
   }
 
   const messages = [
@@ -1629,7 +1713,8 @@ async function createOpenAIBlogDraft({
   let lastError;
   for (const body of chatAttempts) {
     try {
-      return await postOpenAI(openAIUrl, body);
+      const draft = await postOpenAI(openAIUrl, body);
+      return cleanBlogDraftForPublishing(draft);
     } catch (error) {
       lastError = error;
       if (error.status && error.status !== 400) {
@@ -1902,6 +1987,10 @@ app.post("/api/analyze", async (req, res, next) => {
       }
     }
 
+    if (draftSource !== "pending") {
+      draft = cleanBlogDraftForPublishing(draft);
+    }
+
     res.json({
       totalScore,
       placeRank,
@@ -2080,6 +2169,8 @@ app.post("/api/draft", async (req, res, next) => {
       });
       draftSource = "built-in";
     }
+
+    draft = cleanBlogDraftForPublishing(draft);
 
     res.json({
       draft,
