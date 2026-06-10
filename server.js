@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -528,7 +529,7 @@ function mapBlogResults(items = [], options = {}) {
 }
 
 /* 네이버 검색 페이지 HTML을 브라우저처럼 가져온다 (캐시 + 12초 타임아웃) */
-async function fetchSearchPageHtml(url) {
+async function fetchSearchPageHtml(url, referer) {
   const cacheKey = `serp:${url.toString()}`;
   const cached = naverCache.get(cacheKey);
   if (cached && Date.now() - cached.savedAt < NAVER_CACHE_TTL_MS) {
@@ -544,7 +545,8 @@ async function fetchSearchPageHtml(url) {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ko-KR,ko;q=0.9"
+        "Accept-Language": "ko-KR,ko;q=0.9",
+        ...(referer ? { Referer: referer } : {})
       },
       signal: controller ? controller.signal : undefined
     });
@@ -559,6 +561,145 @@ async function fetchSearchPageHtml(url) {
   const html = await response.text();
   naverCache.set(cacheKey, { data: html, savedAt: Date.now() });
   return html;
+}
+
+/* HTML에 심어진 window.__APOLLO_STATE__ JSON을 중괄호 짝을 맞춰 안전하게 꺼낸다 */
+function extractApolloState(html) {
+  const markerIdx = html.indexOf("window.__APOLLO_STATE__");
+  if (markerIdx < 0) {
+    throw new Error("플레이스 목록 데이터를 찾지 못했습니다");
+  }
+  const braceStart = html.indexOf("{", markerIdx);
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let end = -1;
+  for (let i = braceStart; i < html.length; i += 1) {
+    const ch = html[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  if (end < 0) {
+    throw new Error("플레이스 목록 데이터 형식이 올바르지 않습니다");
+  }
+  return JSON.parse(html.slice(braceStart, end + 1));
+}
+
+/* 네이버 지도(플레이스) 목록을 실제 노출 순서 그대로 읽는다.
+   pcmap.place.naver.com 페이지의 서버렌더링 데이터에서 본 목록(광고 제외)과 광고 목록을 분리한다. */
+async function fetchNaverPlaceList(keyword) {
+  const url = new URL("https://pcmap.place.naver.com/place/list");
+  url.searchParams.set("query", String(keyword || "").trim());
+  const html = await fetchSearchPageHtml(url, "https://map.naver.com/");
+  const state = extractApolloState(html);
+  const rootQuery = state.ROOT_QUERY || {};
+
+  const listField = Object.keys(rootQuery).find((key) => key.startsWith("placeList("));
+  if (!listField) {
+    throw new Error("이 키워드는 지도 플레이스 목록이 없습니다");
+  }
+  const businesses = (rootQuery[listField] && rootQuery[listField].businesses) || {};
+  const items = Array.isArray(businesses.items) ? businesses.items : [];
+  const places = items
+    .map((entry, index) => {
+      const node = entry && entry.__ref ? state[entry.__ref] : entry;
+      if (!node || !node.name) return null;
+      return {
+        rank: index + 1,
+        id: String(node.id || ""),
+        name: stripHtml(node.name),
+        category: stripHtml(node.category || ""),
+        roadAddress: stripHtml(node.roadAddress || ""),
+        address: stripHtml(node.address || node.commonAddress || "")
+      };
+    })
+    .filter(Boolean);
+  if (!places.length) {
+    throw new Error("플레이스 목록이 비어 있습니다");
+  }
+
+  const ads = [];
+  const adField = Object.keys(rootQuery).find((key) => key.startsWith("adBusinesses("));
+  if (adField) {
+    const adValue = rootQuery[adField] || {};
+    const adItems = Array.isArray(adValue.items) ? adValue.items : [];
+    adItems.forEach((entry) => {
+      const node = entry && entry.__ref ? state[entry.__ref] : entry;
+      if (node && node.name) ads.push(stripHtml(node.name));
+    });
+  }
+
+  return {
+    places,
+    ads,
+    total: toPositiveInteger(businesses.total, places.length)
+  };
+}
+
+/* 네이버 검색광고 API로 키워드 월 검색량(PC/모바일)을 가져온다.
+   Render 환경변수 NAVER_AD_API_KEY, NAVER_AD_API_SECRET, NAVER_AD_CUSTOMER_ID 가 모두 있을 때만 동작하고,
+   없으면 null을 돌려줘서 화면에는 "—"로 표시된다. */
+const NAVER_AD_API_KEY = process.env.NAVER_AD_API_KEY || "";
+const NAVER_AD_API_SECRET = process.env.NAVER_AD_API_SECRET || "";
+const NAVER_AD_CUSTOMER_ID = process.env.NAVER_AD_CUSTOMER_ID || "";
+
+async function fetchKeywordVolumes(keywords) {
+  if (!NAVER_AD_API_KEY || !NAVER_AD_API_SECRET || !NAVER_AD_CUSTOMER_ID) return null;
+  const uri = "/keywordstool";
+  const timestamp = String(Date.now());
+  const signature = crypto
+    .createHmac("sha256", NAVER_AD_API_SECRET)
+    .update(`${timestamp}.GET.${uri}`)
+    .digest("base64");
+  const url = new URL(`https://api.searchad.naver.com${uri}`);
+  url.searchParams.set(
+    "hintKeywords",
+    keywords.map((keyword) => String(keyword).replace(/\s+/g, "")).join(",")
+  );
+  url.searchParams.set("showDetail", "1");
+
+  const response = await fetch(url, {
+    headers: {
+      "X-Timestamp": timestamp,
+      "X-API-KEY": NAVER_AD_API_KEY,
+      "X-Customer": NAVER_AD_CUSTOMER_ID,
+      "X-Signature": signature
+    }
+  });
+  if (!response.ok) return null;
+  const data = await response.json().catch(() => null);
+  if (!data || !Array.isArray(data.keywordList)) return null;
+
+  const volumeMap = {};
+  data.keywordList.forEach((item) => {
+    const key = normalizeText(item.relKeyword);
+    if (!key || volumeMap[key]) return;
+    const pc = item.monthlyPcQcCnt;
+    const mobile = item.monthlyMobileQcCnt;
+    const pcCount = typeof pc === "number" ? pc : null;
+    const mobileCount = typeof mobile === "number" ? mobile : null;
+    volumeMap[key] = {
+      pc: pcCount,
+      mobile: mobileCount,
+      total: pcCount != null && mobileCount != null ? pcCount + mobileCount : null,
+      pcLabel: pc == null ? "" : String(pc),
+      mobileLabel: mobile == null ? "" : String(mobile)
+    };
+  });
+  return volumeMap;
 }
 
 /* 네이버 통합검색의 "인기글" 블록을 사용자가 보는 화면 순서 그대로 읽는다.
@@ -2309,6 +2450,83 @@ app.post("/api/analyze", async (req, res, next) => {
         checks: blogAnalysis.checks
       },
       prompt
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/* 플레이스 순위추적: 키워드별로 네이버 지도 목록을 실제 순서 그대로 확인해
+   업체의 순위(광고 제외), 페이지 위치, 광고 노출 여부, 상위 경쟁 업체를 돌려준다. */
+app.post("/api/place-rank", async (req, res, next) => {
+  try {
+    const businessName = String(req.body.businessName || "").trim();
+    const keywords = compactUnique(
+      Array.isArray(req.body.keywords) ? req.body.keywords : [req.body.keyword]
+    ).slice(0, 5);
+
+    if (!businessName || !keywords.length) {
+      return res.status(400).json({
+        message: "businessName과 keywords(최대 5개)는 필수 입력값입니다."
+      });
+    }
+
+    const results = [];
+    let business = null;
+
+    for (const keyword of keywords) {
+      try {
+        const listData = await fetchNaverPlaceList(keyword);
+        const matchIndex = listData.places.findIndex((place) =>
+          containsNeedle(place.name, businessName)
+        );
+        const rank = matchIndex >= 0 ? matchIndex + 1 : null;
+        if (!business && matchIndex >= 0) {
+          business = listData.places[matchIndex];
+        }
+        const adExposed = listData.ads.some((adName) => containsNeedle(adName, businessName));
+
+        results.push({
+          keyword,
+          rank,
+          rankLabel: rank ? `${rank}위` : "미노출",
+          page: rank ? Math.ceil(rank / 20) : null,
+          pagePosition: rank ? ((rank - 1) % 20) + 1 : null,
+          totalChecked: listData.places.length,
+          totalCount: listData.total,
+          adExposed,
+          matchedName: matchIndex >= 0 ? listData.places[matchIndex].name : "",
+          topPlaces: listData.places.slice(0, 5).map((place) => ({
+            rank: place.rank,
+            name: place.name,
+            category: place.category,
+            address: place.roadAddress || place.address
+          }))
+        });
+      } catch (error) {
+        results.push({ keyword, rank: null, rankLabel: "확인 실패", error: error.message });
+      }
+      await sleep(300);
+    }
+
+    let volumes = null;
+    try {
+      volumes = await fetchKeywordVolumes(keywords);
+    } catch (error) {
+      volumes = null;
+    }
+
+    res.json({
+      business,
+      results,
+      volumes,
+      volumesAvailable: Boolean(volumes),
+      checkedAt: new Intl.DateTimeFormat("ko-KR", {
+        timeZone: "Asia/Seoul",
+        dateStyle: "medium",
+        timeStyle: "short"
+      }).format(new Date()),
+      rankBasis: "네이버 지도(플레이스) 목록 실제 노출 순서 기준, 광고 제외"
     });
   } catch (error) {
     next(error);
