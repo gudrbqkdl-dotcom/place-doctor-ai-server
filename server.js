@@ -527,44 +527,130 @@ function mapBlogResults(items = [], options = {}) {
   }));
 }
 
-/* 실제 네이버 블로그탭 검색 화면을 그대로 읽어, 사용자에게 보이는 노출 순서대로 글 목록을 수집한다.
-   공식 검색 API(sort=sim)는 실제 화면 순서와 달라서, 화면 기준 순위 확인에는 이 결과를 우선 사용한다. */
+/* 네이버 검색 페이지 HTML을 브라우저처럼 가져온다 (캐시 + 12초 타임아웃) */
+async function fetchSearchPageHtml(url) {
+  const cacheKey = `serp:${url.toString()}`;
+  const cached = naverCache.get(cacheKey);
+  if (cached && Date.now() - cached.savedAt < NAVER_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 12000) : null;
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9"
+      },
+      signal: controller ? controller.signal : undefined
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  if (!response.ok) {
+    const error = new Error(`네이버 검색 페이지 응답 오류 ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  const html = await response.text();
+  naverCache.set(cacheKey, { data: html, savedAt: Date.now() });
+  return html;
+}
+
+/* 네이버 통합검색의 "인기글" 블록을 사용자가 보는 화면 순서 그대로 읽는다.
+   채널(블로거/카페) 링크가 나오면 새 묶음이 시작되고, 묶음의 첫 글이 대표글(순위),
+   그 아래 딸린 글은 묶음글로 표시한다. 블로그글과 카페글을 모두 포함한다. */
+async function fetchNaverPopularPosts(keyword, limit = 30) {
+  const url = new URL("https://search.naver.com/search.naver");
+  url.searchParams.set("where", "nexearch");
+  url.searchParams.set("sm", "top_hty");
+  url.searchParams.set("query", String(keyword || "").trim());
+  const html = await fetchSearchPageHtml(url);
+
+  let headingIdx = html.indexOf("인기글<");
+  if (headingIdx < 0) headingIdx = html.indexOf("인기글");
+  if (headingIdx < 0) {
+    throw new Error("통합검색 결과에 인기글 블록이 없습니다");
+  }
+  let sectionEnd = html.indexOf("</section>", headingIdx);
+  if (sectionEnd < 0) sectionEnd = Math.min(html.length, headingIdx + 160000);
+  const block = html.slice(headingIdx, sectionEnd);
+
+  const anchorRegex =
+    /<a\b[^>]*href="(https:\/\/(?:m\.)?(?:blog|cafe)\.naver\.com\/([^"\/?]+)(?:\/(\d+))?)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+  const seen = new Set();
+  const results = [];
+  let currentChannel = "";
+  let groupHasMain = false;
+  let mainCount = 0;
+  let match;
+  while ((match = anchorRegex.exec(block)) !== null) {
+    const link = match[1]
+      .replace("//m.blog.", "//blog.")
+      .replace("//m.cafe.", "//cafe.");
+    const postId = match[3];
+    const innerText = stripHtml(match[4]);
+
+    if (!postId) {
+      /* 글번호가 없는 링크 = 채널(블로거/카페) 홈 → 새 묶음 시작 */
+      if (innerText) currentChannel = innerText;
+      groupHasMain = false;
+      continue;
+    }
+    if (innerText.length < 4) continue; /* 썸네일 등 제목 없는 링크 제외 */
+    if (/(?:blog|cafe)\.naver\.com/.test(innerText)) continue; /* 하단 추천영역의 주소 노출형 링크 제외 */
+    if (seen.has(link)) continue;
+    seen.add(link);
+
+    if (!groupHasMain) {
+      mainCount += 1;
+      groupHasMain = true;
+      results.push({
+        rank: mainCount,
+        rankLabel: String(mainCount),
+        searchQuery: String(keyword || "").trim(),
+        searchType: "serp",
+        title: innerText,
+        description: "",
+        bloggerName: currentChannel,
+        link,
+        postdate: "",
+        isSubPost: false
+      });
+    } else {
+      results.push({
+        rank: mainCount,
+        rankLabel: `${mainCount}위 묶음글`,
+        searchQuery: String(keyword || "").trim(),
+        searchType: "serp",
+        title: innerText,
+        description: "",
+        bloggerName: currentChannel,
+        link,
+        postdate: "",
+        isSubPost: true
+      });
+    }
+    if (mainCount >= limit) break;
+  }
+
+  if (mainCount < 1) {
+    throw new Error("인기글 블록에서 글을 찾지 못했습니다");
+  }
+  return results;
+}
+
+/* 네이버 블로그탭 검색 화면을 노출 순서대로 읽는다 (인기글 블록이 없을 때 2차 수단) */
 async function fetchNaverBlogTabResults(keyword, limit = 30) {
   const url = new URL("https://search.naver.com/search.naver");
   url.searchParams.set("ssc", "tab.blog.all");
   url.searchParams.set("sm", "tab_jum");
   url.searchParams.set("query", String(keyword || "").trim());
-
-  const cacheKey = `blogtab:${url.toString()}`;
-  const cached = naverCache.get(cacheKey);
-  let html;
-  if (cached && Date.now() - cached.savedAt < NAVER_CACHE_TTL_MS) {
-    html = cached.data;
-  } else {
-    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => controller.abort(), 12000) : null;
-    let response;
-    try {
-      response = await fetch(url, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "ko-KR,ko;q=0.9"
-        },
-        signal: controller ? controller.signal : undefined
-      });
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-    if (!response.ok) {
-      const error = new Error(`네이버 검색 페이지 응답 오류 ${response.status}`);
-      error.status = response.status;
-      throw error;
-    }
-    html = await response.text();
-    naverCache.set(cacheKey, { data: html, savedAt: Date.now() });
-  }
+  const html = await fetchSearchPageHtml(url);
 
   const anchorRegex = /<a\b[^>]*href="(https:\/\/(?:m\.)?blog\.naver\.com\/[^"\/]+\/\d+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
   const seen = new Set();
@@ -585,7 +671,8 @@ async function fetchNaverBlogTabResults(keyword, limit = 30) {
       description: "",
       bloggerName: "",
       link,
-      postdate: ""
+      postdate: "",
+      isSubPost: false
     });
     if (results.length >= limit) break;
   }
@@ -788,19 +875,38 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     (item) => item.link || `${item.title} ${item.bloggerName}`
   );
 
-  /* 1순위: 실제 네이버 블로그탭 화면 순서 (사용자가 검색했을 때 보이는 그대로) */
+  /* 1순위: 통합검색 "인기글" 블록 (사용자가 네이버에서 검색했을 때 보이는 화면 그대로)
+     2순위: 블로그탭 노출 순서
+     3순위(아래 폴백): 공식 검색 API */
   let serpResults = [];
+  let serpSource = "";
   try {
-    serpResults = await fetchNaverBlogTabResults(keyword, 30);
+    serpResults = await fetchNaverPopularPosts(keyword, 30);
+    serpSource = "naver-popular-block";
   } catch (error) {
     searchErrors.push({
       query: keyword,
-      message: `네이버 블로그탭 실제 화면 확인 실패: ${error.message}`,
+      message: `통합검색 인기글 확인 실패: ${error.message}`,
       status: error.status || 0
     });
   }
+  if (serpResults.filter((item) => !item.isSubPost).length < 3) {
+    try {
+      serpResults = await fetchNaverBlogTabResults(keyword, 30);
+      serpSource = "naver-blog-tab";
+    } catch (error) {
+      serpResults = [];
+      serpSource = "";
+      searchErrors.push({
+        query: keyword,
+        message: `네이버 블로그탭 실제 화면 확인 실패: ${error.message}`,
+        status: error.status || 0
+      });
+    }
+  }
+  const serpMainCount = serpResults.filter((item) => !item.isSubPost).length;
 
-  if (serpResults.length >= 3) {
+  if (serpMainCount >= 3) {
     /* 공식 API 결과와 링크가 겹치면 설명·블로거명을 가져와 보강한다 */
     const apiByLink = new Map(
       allPrimaryKeywordResults
@@ -813,16 +919,18 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
         ? {
             ...item,
             description: apiItem.description || "",
-            bloggerName: apiItem.bloggerName || "",
+            bloggerName: item.bloggerName || apiItem.bloggerName || "",
             postdate: apiItem.postdate || ""
           }
         : item;
     });
+    /* 화면에는 대표글만 순서대로 보여주고, 업체 글 확인은 묶음글까지 모두 검사한다 */
+    const mainResults = enrichedResults.filter((item) => !item.isSubPost);
     const ownBlogResults = enrichedResults
       .filter((item) => blogResultMatchesBusiness(item, businessName, keyword, category))
       .map((item) => ({
         rank: item.rank,
-        rankLabel: `${item.rank}위`,
+        rankLabel: item.isSubPost ? `${item.rank}위 묶음글` : `${item.rank}위`,
         title: item.title,
         description: item.description,
         bloggerName: item.bloggerName,
@@ -830,26 +938,35 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
         searchQuery: item.searchQuery
       }));
     const blogRankMatch = ownBlogResults[0] || null;
+    const basisLabel =
+      serpSource === "naver-popular-block"
+        ? `${keyword} 네이버 통합검색 인기글 실제 노출 순서 기준 (대표글 ${serpMainCount}개, 묶음글 포함 검사)`
+        : `${keyword} 네이버 블로그탭 실제 노출 순서 기준 (상위 ${serpMainCount}개 확인)`;
 
     return {
       blogRank: blogRankMatch ? blogRankMatch.rank : null,
       blogRankLabel: blogRankMatch ? blogRankMatch.rankLabel : "미노출",
       blogRankSearchQuery: blogRankMatch ? blogRankMatch.searchQuery : "",
-      blogRankBasis: `${keyword} 네이버 블로그탭 실제 노출 순서 기준 (상위 ${enrichedResults.length}개 확인)`,
-      blogRankSource: "naver-search-page",
+      blogRankBasis: basisLabel,
+      blogRankSource: serpSource,
       ownBlogResult: blogRankMatch || null,
       ownBlogResults,
       blogVariantRank: null,
       blogVariantRankLabel: "",
       blogVariantRankSearchQuery: "",
       blogFoundByName: Boolean(blogRankMatch),
-      keywordBlogResults: enrichedResults.slice(0, 10),
-      blogResults: enrichedResults.slice(0, 10),
+      keywordBlogResults: mainResults.slice(0, 10),
+      blogResults: mainResults.slice(0, 10),
       blogContextResults: allPrimaryKeywordResults.length
         ? allPrimaryKeywordResults.slice(0, 10)
-        : enrichedResults.slice(0, 10),
+        : mainResults.slice(0, 10),
       businessBlogResults: [],
-      blogSearchQueries: compactUnique([...queries, `${keyword} (블로그탭 실제 화면)`]),
+      blogSearchQueries: compactUnique([
+        ...queries,
+        serpSource === "naver-popular-block"
+          ? `${keyword} (통합검색 인기글 실제 화면)`
+          : `${keyword} (블로그탭 실제 화면)`
+      ]),
       blogKeywordSearchQueries: keywordQueries,
       blogBusinessSearchQueries: [],
       blogSearchErrors: searchErrors
@@ -2039,9 +2156,11 @@ app.post("/api/analyze", async (req, res, next) => {
           : ["플레이스 미노출"]),
       ...(blogRank
         ? [
-            blogAnalysisResults.blogRankSource === "naver-search-page"
-              ? "네이버 실제 화면 블로그 노출 확인"
-              : "공식 API 블로그 노출 확인"
+            blogAnalysisResults.blogRankSource === "naver-popular-block"
+              ? "네이버 인기글 실제 화면 노출 확인"
+              : blogAnalysisResults.blogRankSource === "naver-blog-tab"
+                ? "네이버 블로그탭 실제 화면 노출 확인"
+                : "공식 API 블로그 노출 확인"
           ]
         : blogAnalysisResults.blogFoundByName
           ? ["업체명 블로그 검색 확인", "대표키워드 미노출"]
@@ -2157,9 +2276,11 @@ app.post("/api/analyze", async (req, res, next) => {
         viewUrl: createNaverSearchUrl(keyword, "view"),
         blogUrl: createNaverSearchUrl(keyword, "blog"),
         guide:
-          blogAnalysisResults.blogRankSource === "naver-search-page"
-            ? "네이버 블로그탭 실제 화면에서 보이는 순서 그대로 확인한 결과입니다. 아래 링크로 직접 비교할 수 있습니다."
-            : "실제 화면 확인이 일시적으로 막혀 공식 API 순서로 표시했습니다. 아래 링크로 실제 화면을 함께 확인하세요."
+          blogAnalysisResults.blogRankSource === "naver-popular-block"
+            ? "네이버 통합검색 인기글 블록에서 보이는 순서 그대로 확인한 결과입니다. 아래 링크로 직접 비교할 수 있습니다."
+            : blogAnalysisResults.blogRankSource === "naver-blog-tab"
+              ? "이 키워드는 통합검색 인기글 블록이 없어 네이버 블로그탭 실제 화면 순서로 확인했습니다."
+              : "실제 화면 확인이 일시적으로 막혀 공식 API 순서로 표시했습니다. 아래 링크로 실제 화면을 함께 확인하세요."
       },
       blogScore,
       badges,
