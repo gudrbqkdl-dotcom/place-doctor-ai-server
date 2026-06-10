@@ -527,6 +527,71 @@ function mapBlogResults(items = [], options = {}) {
   }));
 }
 
+/* 실제 네이버 블로그탭 검색 화면을 그대로 읽어, 사용자에게 보이는 노출 순서대로 글 목록을 수집한다.
+   공식 검색 API(sort=sim)는 실제 화면 순서와 달라서, 화면 기준 순위 확인에는 이 결과를 우선 사용한다. */
+async function fetchNaverBlogTabResults(keyword, limit = 30) {
+  const url = new URL("https://search.naver.com/search.naver");
+  url.searchParams.set("ssc", "tab.blog.all");
+  url.searchParams.set("sm", "tab_jum");
+  url.searchParams.set("query", String(keyword || "").trim());
+
+  const cacheKey = `blogtab:${url.toString()}`;
+  const cached = naverCache.get(cacheKey);
+  let html;
+  if (cached && Date.now() - cached.savedAt < NAVER_CACHE_TTL_MS) {
+    html = cached.data;
+  } else {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 12000) : null;
+    let response;
+    try {
+      response = await fetch(url, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "ko-KR,ko;q=0.9"
+        },
+        signal: controller ? controller.signal : undefined
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (!response.ok) {
+      const error = new Error(`네이버 검색 페이지 응답 오류 ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    html = await response.text();
+    naverCache.set(cacheKey, { data: html, savedAt: Date.now() });
+  }
+
+  const anchorRegex = /<a\b[^>]*href="(https:\/\/(?:m\.)?blog\.naver\.com\/[^"\/]+\/\d+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+  const seen = new Set();
+  const results = [];
+  let match;
+  while ((match = anchorRegex.exec(html)) !== null) {
+    const link = match[1].replace("//m.blog.", "//blog.");
+    const title = stripHtml(match[2]);
+    if (title.length < 8) continue; /* 썸네일·블로거명 링크 제외, 제목 링크만 수집 */
+    if (seen.has(link)) continue;
+    seen.add(link);
+    results.push({
+      rank: results.length + 1,
+      rankLabel: String(results.length + 1),
+      searchQuery: String(keyword || "").trim(),
+      searchType: "serp",
+      title,
+      description: "",
+      bloggerName: "",
+      link,
+      postdate: ""
+    });
+    if (results.length >= limit) break;
+  }
+  return results;
+}
+
 function findPlaceRank(localResults, businessName) {
   const match = localResults.find((item) => containsNeedle(item.title, businessName));
   return match ? match.rank : null;
@@ -722,6 +787,76 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     primaryKeywordResults,
     (item) => item.link || `${item.title} ${item.bloggerName}`
   );
+
+  /* 1순위: 실제 네이버 블로그탭 화면 순서 (사용자가 검색했을 때 보이는 그대로) */
+  let serpResults = [];
+  try {
+    serpResults = await fetchNaverBlogTabResults(keyword, 30);
+  } catch (error) {
+    searchErrors.push({
+      query: keyword,
+      message: `네이버 블로그탭 실제 화면 확인 실패: ${error.message}`,
+      status: error.status || 0
+    });
+  }
+
+  if (serpResults.length >= 3) {
+    /* 공식 API 결과와 링크가 겹치면 설명·블로거명을 가져와 보강한다 */
+    const apiByLink = new Map(
+      allPrimaryKeywordResults
+        .filter((item) => item.link)
+        .map((item) => [item.link.split("?")[0], item])
+    );
+    const enrichedResults = serpResults.map((item) => {
+      const apiItem = apiByLink.get(item.link);
+      return apiItem
+        ? {
+            ...item,
+            description: apiItem.description || "",
+            bloggerName: apiItem.bloggerName || "",
+            postdate: apiItem.postdate || ""
+          }
+        : item;
+    });
+    const ownBlogResults = enrichedResults
+      .filter((item) => blogResultMatchesBusiness(item, businessName, keyword, category))
+      .map((item) => ({
+        rank: item.rank,
+        rankLabel: `${item.rank}위`,
+        title: item.title,
+        description: item.description,
+        bloggerName: item.bloggerName,
+        link: item.link,
+        searchQuery: item.searchQuery
+      }));
+    const blogRankMatch = ownBlogResults[0] || null;
+
+    return {
+      blogRank: blogRankMatch ? blogRankMatch.rank : null,
+      blogRankLabel: blogRankMatch ? blogRankMatch.rankLabel : "미노출",
+      blogRankSearchQuery: blogRankMatch ? blogRankMatch.searchQuery : "",
+      blogRankBasis: `${keyword} 네이버 블로그탭 실제 노출 순서 기준 (상위 ${enrichedResults.length}개 확인)`,
+      blogRankSource: "naver-search-page",
+      ownBlogResult: blogRankMatch || null,
+      ownBlogResults,
+      blogVariantRank: null,
+      blogVariantRankLabel: "",
+      blogVariantRankSearchQuery: "",
+      blogFoundByName: Boolean(blogRankMatch),
+      keywordBlogResults: enrichedResults.slice(0, 10),
+      blogResults: enrichedResults.slice(0, 10),
+      blogContextResults: allPrimaryKeywordResults.length
+        ? allPrimaryKeywordResults.slice(0, 10)
+        : enrichedResults.slice(0, 10),
+      businessBlogResults: [],
+      blogSearchQueries: compactUnique([...queries, `${keyword} (블로그탭 실제 화면)`]),
+      blogKeywordSearchQueries: keywordQueries,
+      blogBusinessSearchQueries: [],
+      blogSearchErrors: searchErrors
+    };
+  }
+
+  /* 2순위(폴백): 실제 화면 확인이 막힌 경우 기존 공식 검색 API 기준 */
   const dedupedPrimaryKeywordResults = allPrimaryKeywordResults.slice(0, 10);
   const ownBlogResults = allPrimaryKeywordResults
     .filter((item) => blogResultMatchesBusiness(item, businessName, keyword, category))
@@ -740,7 +875,8 @@ async function analyzeBlogResults({ businessName, keyword, category, blogDisplay
     blogRank: blogRankMatch ? blogRankMatch.rank : null,
     blogRankLabel: blogRankMatch ? blogRankMatch.rankLabel : "미노출",
     blogRankSearchQuery: blogRankMatch ? blogRankMatch.searchQuery : "",
-    blogRankBasis: `${keyword} 대표키워드 단독 검색 결과 최대 ${primaryDisplay}개 기준`,
+    blogRankBasis: `${keyword} 공식 검색 API 결과 최대 ${primaryDisplay}개 기준 (실제 화면 확인 실패로 대체)`,
+    blogRankSource: "openapi",
     ownBlogResult: blogRankMatch || null,
     ownBlogResults,
     blogVariantRank: null,
@@ -1902,9 +2038,13 @@ app.post("/api/analyze", async (req, res, next) => {
           ? ["업체명 검색 확인", "키워드 5위권 밖"]
           : ["플레이스 미노출"]),
       ...(blogRank
-        ? ["공식 API 블로그 노출 확인"]
+        ? [
+            blogAnalysisResults.blogRankSource === "naver-search-page"
+              ? "네이버 실제 화면 블로그 노출 확인"
+              : "공식 API 블로그 노출 확인"
+          ]
         : blogAnalysisResults.blogFoundByName
-          ? ["업체명 블로그 검색 확인", "공식 API 대표키워드 미노출"]
+          ? ["업체명 블로그 검색 확인", "대표키워드 미노출"]
           : ["블로그 미노출"]),
       ...(blogAnalysis.checks.topTitleKeyword ? ["1위권 제목 키워드 확인"] : []),
       ...(blogAnalysis.checks.richTopBlogContext ? ["상위 블로그 5개 분석"] : []),
@@ -2003,6 +2143,7 @@ app.post("/api/analyze", async (req, res, next) => {
       blogRankLabel: blogAnalysisResults.blogRankLabel,
       blogRankSearchQuery: blogAnalysisResults.blogRankSearchQuery,
       blogRankBasis: blogAnalysisResults.blogRankBasis,
+      blogRankSource: blogAnalysisResults.blogRankSource || "openapi",
       ownBlogResult: blogAnalysisResults.ownBlogResult,
       ownBlogResults: blogAnalysisResults.ownBlogResults,
       blogVariantRank: blogAnalysisResults.blogVariantRank,
@@ -2016,7 +2157,9 @@ app.post("/api/analyze", async (req, res, next) => {
         viewUrl: createNaverSearchUrl(keyword, "view"),
         blogUrl: createNaverSearchUrl(keyword, "blog"),
         guide:
-          "실제 네이버 화면은 VIEW, 인기글, 스마트블록 구성에 따라 공식 API 순서와 다를 수 있습니다. 아래 링크로 실제 화면을 함께 확인하세요."
+          blogAnalysisResults.blogRankSource === "naver-search-page"
+            ? "네이버 블로그탭 실제 화면에서 보이는 순서 그대로 확인한 결과입니다. 아래 링크로 직접 비교할 수 있습니다."
+            : "실제 화면 확인이 일시적으로 막혀 공식 API 순서로 표시했습니다. 아래 링크로 실제 화면을 함께 확인하세요."
       },
       blogScore,
       badges,
