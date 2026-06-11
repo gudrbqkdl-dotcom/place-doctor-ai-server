@@ -652,54 +652,69 @@ async function fetchNaverPlaceList(keyword) {
 /* 네이버 검색광고 API로 키워드 월 검색량(PC/모바일)을 가져온다.
    Render 환경변수 NAVER_AD_API_KEY, NAVER_AD_API_SECRET, NAVER_AD_CUSTOMER_ID 가 모두 있을 때만 동작하고,
    없으면 null을 돌려줘서 화면에는 "—"로 표시된다. */
-const NAVER_AD_API_KEY = process.env.NAVER_AD_API_KEY || "";
-const NAVER_AD_API_SECRET = process.env.NAVER_AD_API_SECRET || "";
-const NAVER_AD_CUSTOMER_ID = process.env.NAVER_AD_CUSTOMER_ID || "";
+const NAVER_AD_API_KEY = String(process.env.NAVER_AD_API_KEY || "").trim();
+const NAVER_AD_API_SECRET = String(process.env.NAVER_AD_API_SECRET || "").trim();
+const NAVER_AD_CUSTOMER_ID = String(process.env.NAVER_AD_CUSTOMER_ID || "").trim().replace(/\D/g, "");
 
+/* 성공: { volumes: {...}, status: "ok" } / 실패: { volumes: null, status: 원인 } */
 async function fetchKeywordVolumes(keywords) {
-  if (!NAVER_AD_API_KEY || !NAVER_AD_API_SECRET || !NAVER_AD_CUSTOMER_ID) return null;
-  const uri = "/keywordstool";
-  const timestamp = String(Date.now());
-  const signature = crypto
-    .createHmac("sha256", NAVER_AD_API_SECRET)
-    .update(`${timestamp}.GET.${uri}`)
-    .digest("base64");
-  const url = new URL(`https://api.searchad.naver.com${uri}`);
-  url.searchParams.set(
-    "hintKeywords",
-    keywords.map((keyword) => String(keyword).replace(/\s+/g, "")).join(",")
-  );
-  url.searchParams.set("showDetail", "1");
+  if (!NAVER_AD_API_KEY || !NAVER_AD_API_SECRET || !NAVER_AD_CUSTOMER_ID) {
+    return { volumes: null, status: "missing-env" };
+  }
+  try {
+    const uri = "/keywordstool";
+    const timestamp = String(Date.now());
+    const signature = crypto
+      .createHmac("sha256", NAVER_AD_API_SECRET)
+      .update(`${timestamp}.GET.${uri}`)
+      .digest("base64");
+    const url = new URL(`https://api.searchad.naver.com${uri}`);
+    url.searchParams.set(
+      "hintKeywords",
+      keywords.map((keyword) => String(keyword).replace(/\s+/g, "")).join(",")
+    );
+    url.searchParams.set("showDetail", "1");
 
-  const response = await fetch(url, {
-    headers: {
-      "X-Timestamp": timestamp,
-      "X-API-KEY": NAVER_AD_API_KEY,
-      "X-Customer": NAVER_AD_CUSTOMER_ID,
-      "X-Signature": signature
+    const response = await fetch(url, {
+      headers: {
+        "X-Timestamp": timestamp,
+        "X-API-KEY": NAVER_AD_API_KEY,
+        "X-Customer": NAVER_AD_CUSTOMER_ID,
+        "X-Signature": signature
+      }
+    });
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "");
+      return {
+        volumes: null,
+        status: `HTTP ${response.status} ${bodyText.slice(0, 160)}`.trim()
+      };
     }
-  });
-  if (!response.ok) return null;
-  const data = await response.json().catch(() => null);
-  if (!data || !Array.isArray(data.keywordList)) return null;
+    const data = await response.json().catch(() => null);
+    if (!data || !Array.isArray(data.keywordList)) {
+      return { volumes: null, status: "응답 형식이 올바르지 않습니다" };
+    }
 
-  const volumeMap = {};
-  data.keywordList.forEach((item) => {
-    const key = normalizeText(item.relKeyword);
-    if (!key || volumeMap[key]) return;
-    const pc = item.monthlyPcQcCnt;
-    const mobile = item.monthlyMobileQcCnt;
-    const pcCount = typeof pc === "number" ? pc : null;
-    const mobileCount = typeof mobile === "number" ? mobile : null;
-    volumeMap[key] = {
-      pc: pcCount,
-      mobile: mobileCount,
-      total: pcCount != null && mobileCount != null ? pcCount + mobileCount : null,
-      pcLabel: pc == null ? "" : String(pc),
-      mobileLabel: mobile == null ? "" : String(mobile)
-    };
-  });
-  return volumeMap;
+    const volumeMap = {};
+    data.keywordList.forEach((item) => {
+      const key = normalizeText(item.relKeyword);
+      if (!key || volumeMap[key]) return;
+      const pc = item.monthlyPcQcCnt;
+      const mobile = item.monthlyMobileQcCnt;
+      const pcCount = typeof pc === "number" ? pc : null;
+      const mobileCount = typeof mobile === "number" ? mobile : null;
+      volumeMap[key] = {
+        pc: pcCount,
+        mobile: mobileCount,
+        total: pcCount != null && mobileCount != null ? pcCount + mobileCount : null,
+        pcLabel: pc == null ? "" : String(pc),
+        mobileLabel: mobile == null ? "" : String(mobile)
+      };
+    });
+    return { volumes: volumeMap, status: "ok" };
+  } catch (error) {
+    return { volumes: null, status: `요청 실패: ${error.message}` };
+  }
 }
 
 /* 네이버 통합검색의 "인기글" 블록을 사용자가 보는 화면 순서 그대로 읽는다.
@@ -2509,18 +2524,19 @@ app.post("/api/place-rank", async (req, res, next) => {
       await sleep(300);
     }
 
-    let volumes = null;
+    let volumeResult = { volumes: null, status: "missing-env" };
     try {
-      volumes = await fetchKeywordVolumes(keywords);
+      volumeResult = await fetchKeywordVolumes(keywords);
     } catch (error) {
-      volumes = null;
+      volumeResult = { volumes: null, status: `요청 실패: ${error.message}` };
     }
 
     res.json({
       business,
       results,
-      volumes,
-      volumesAvailable: Boolean(volumes),
+      volumes: volumeResult.volumes,
+      volumesAvailable: Boolean(volumeResult.volumes),
+      volumesStatus: volumeResult.status,
       checkedAt: new Intl.DateTimeFormat("ko-KR", {
         timeZone: "Asia/Seoul",
         dateStyle: "medium",
