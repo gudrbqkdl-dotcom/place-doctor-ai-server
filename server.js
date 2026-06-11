@@ -229,6 +229,17 @@ const FITNESS_TERMS = [
   "퍼스널트레이닝"
 ];
 
+/* 요가·필라테스 같은 웰니스 업종 — 헬스장과 분리해서 키워드가 섞이지 않게 한다 */
+const WELLNESS_TERMS = [
+  "요가원",
+  "요가",
+  "필라테스",
+  "크로스핏",
+  "복싱",
+  "수영장",
+  "수영"
+];
+
 const COMMON_CATEGORY_TERMS = [
   ...FITNESS_TERMS,
   "맛집",
@@ -262,7 +273,14 @@ const COMMON_CATEGORY_TERMS = [
 
 function hasFitnessIntent(keyword, category) {
   const normalized = normalizeText(`${keyword} ${category}`);
-  return FITNESS_TERMS.some((term) => normalized.includes(normalizeText(term)));
+  return [...FITNESS_TERMS, ...WELLNESS_TERMS].some((term) =>
+    normalized.includes(normalizeText(term))
+  );
+}
+
+function isWellnessContext(keyword, category) {
+  const normalized = normalizeText(`${keyword} ${category}`);
+  return WELLNESS_TERMS.some((term) => normalized.includes(normalizeText(term)));
 }
 
 function getCategorySearchTerms(category) {
@@ -325,6 +343,11 @@ function findGangwonRegions(keyword) {
 
 function getPrimaryFitnessTerm(keyword, category) {
   const normalized = normalizeText(`${keyword} ${category}`);
+  if (normalized.includes("필라테스")) return "필라테스";
+  if (normalized.includes("요가")) return "요가";
+  if (normalized.includes("크로스핏")) return "크로스핏";
+  if (normalized.includes("복싱")) return "복싱";
+  if (normalized.includes("수영")) return "수영장";
   if (normalized.includes("헬스")) return "헬스장";
   if (normalized.includes("피트니스")) return "피트니스";
   if (normalized.includes("pt")) return "PT";
@@ -341,7 +364,16 @@ function buildGangwonFitnessVariants({ keyword, category }) {
 
   const wideKeyword = isGangwonWideKeyword(keyword);
   const primaryTerm = getPrimaryFitnessTerm(keyword, category);
-  const terms = wideKeyword ? [primaryTerm] : compactUnique([primaryTerm, ...FITNESS_TERMS]);
+  /* 요가·필라테스 검색에 헬스장 변형이 섞이지 않게 업종군별로 확장 단어를 고른다 */
+  const expansionTerms = isWellnessContext(keyword, category)
+    ? compactUnique([
+        primaryTerm,
+        primaryTerm === "요가" ? "요가원" : "",
+        primaryTerm === "수영장" ? "수영" : "",
+        "운동"
+      ])
+    : FITNESS_TERMS;
+  const terms = wideKeyword ? [primaryTerm] : compactUnique([primaryTerm, ...expansionTerms]);
   const variants = [];
 
   regions.forEach((region) => {
@@ -1318,13 +1350,15 @@ function getPrimaryRegion(keyword) {
   const region = findGangwonRegions(keyword)[0];
   if (region) return region.base;
 
-  const match = String(keyword || "").match(/^([\uac00-\ud7a3]{2,4})(헬스장|헬스|피트니스|PT|피티|운동)/i);
+  const match = String(keyword || "").match(/^([\uac00-\ud7a3]{2,4})(헬스장|헬스|피트니스|필라테스|요가원|요가|크로스핏|복싱|수영장|수영|PT|피티|운동)/i);
   return match ? match[1] : "";
 }
 
 function buildRecommendedKeywords({ businessName, keyword, category, blogResults, localResults }) {
   const region = getPrimaryRegion(keyword);
   const primaryTerm = getPrimaryFitnessTerm(keyword, category);
+  /* 헬스장 계열일 때만 PT·헬스 추천을 섞는다 (요가·필라테스 검색에 헬스 키워드 오염 방지) */
+  const isGymContext = /헬스|피트니스|퍼스널|pt|피티/.test(normalizeText(`${keyword} ${category}`));
   const baseKeywords = buildKeywordVariants({ keyword, category });
   const topBlogText = blogResults
     .slice(0, 8)
@@ -1379,12 +1413,12 @@ function buildRecommendedKeywords({ businessName, keyword, category, blogResults
     `${keyword} 시설`,
     `${keyword} 위치`,
     `${keyword} 리뷰`,
-    `${keyword} PT`,
-    `${keyword} 피티`,
+    isGymContext ? `${keyword} PT` : `${keyword} 체험`,
+    isGymContext ? `${keyword} 피티` : `${keyword} 수업`,
     `${keyword} 초보`,
     `${keyword} 다이어트`,
-    region ? `${region} 헬스장 추천` : "",
-    region ? `${region} PT 상담` : ""
+    region && primaryTerm ? `${region} ${primaryTerm} 추천` : "",
+    isGymContext && region ? `${region} PT 상담` : ""
   ]).slice(0, 12);
 
   const placeKeywords = compactUnique([
@@ -1394,8 +1428,8 @@ function buildRecommendedKeywords({ businessName, keyword, category, blogResults
     `${businessName} 상담`,
     `${businessName} 위치`,
     `${businessName} 리뷰`,
-    `${businessName} PT`,
-    `${businessName} 피티`
+    isGymContext ? `${businessName} PT` : `${businessName} 체험`,
+    isGymContext ? `${businessName} 피티` : `${businessName} 수업`
   ]).slice(0, 8);
 
   const titleKeywords = compactUnique([
@@ -1409,18 +1443,20 @@ function buildRecommendedKeywords({ businessName, keyword, category, blogResults
 
   const related = compactUnique([
     ...baseKeywords,
-    region ? `${region} 헬스` : "",
-    region ? `${region} 헬스장` : "",
-    region ? `${region} 피트니스` : "",
-    region ? `${region} PT` : "",
-    region ? `${region} 피티` : "",
+    region && primaryTerm ? `${region}${primaryTerm}` : "",
+    region && primaryTerm ? `${region} ${primaryTerm}` : "",
+    isGymContext && region ? `${region} 헬스` : "",
+    isGymContext && region ? `${region} 헬스장` : "",
+    isGymContext && region ? `${region} 피트니스` : "",
+    isGymContext && region ? `${region} PT` : "",
+    isGymContext && region ? `${region} 피티` : "",
     region ? `${region} 운동` : "",
     region ? `${region} 다이어트` : "",
     region ? `${region} 체형관리` : "",
-    region ? `${region} 근력운동` : "",
-    region ? `${region} 헬스장 가격` : "",
-    region ? `${region} 헬스장 시설` : "",
-    region ? `${region} 헬스장 리뷰` : ""
+    isGymContext && region ? `${region} 근력운동` : "",
+    region && primaryTerm ? `${region} ${primaryTerm} 가격` : "",
+    region && primaryTerm ? `${region} ${primaryTerm} 시설` : "",
+    region && primaryTerm ? `${region} ${primaryTerm} 리뷰` : ""
   ]).slice(0, 14);
 
   const nextPlanKeywords = compactUnique([
@@ -1428,12 +1464,12 @@ function buildRecommendedKeywords({ businessName, keyword, category, blogResults
     `${keyword} 가격`,
     `${keyword} 시설`,
     `${keyword} 초보`,
-    `${keyword} PT`,
+    isGymContext ? `${keyword} PT` : `${keyword} 체험 수업`,
     `${keyword} 다이어트`,
     `${keyword} 운동 루틴`,
-    region ? `${region} 피트니스 추천` : "",
-    region ? `${region} PT 상담` : "",
-    region ? `${region} 헬스장 비교` : ""
+    region && primaryTerm ? `${region} ${primaryTerm} 추천` : "",
+    isGymContext && region ? `${region} PT 상담` : "",
+    region && primaryTerm ? `${region} ${primaryTerm} 비교` : ""
   ]).slice(0, 8);
 
   const nextPlan = nextPlanKeywords.map((nextKeyword, index) => ({
@@ -1631,10 +1667,10 @@ function buildExpertBlogRules({ businessName, keyword, category, isTreatraum }) 
 
   return [
     "[블로그 작성 최상위 규칙]",
-    "당신은 네이버 플레이스 SEO 전문가이자 지역 헬스장 마케팅 컨설턴트다.",
+    `당신은 네이버 플레이스 SEO 전문가이자 지역 ${category || "피트니스·웰니스"} 마케팅 컨설턴트다.`,
     isTreatraum
       ? "화자는 동해 트리트라움 5년차 트레이너처럼 말한다. 과장된 광고문이 아니라 실제로 상담하고 안내하는 사람의 자연스러운 존댓말로 쓴다."
-      : "화자는 해당 지역에서 실제 고객을 상담하는 피트니스 전문가처럼 말한다. 과장된 광고문이 아니라 자연스러운 존댓말로 쓴다.",
+      : `화자는 해당 지역에서 실제 고객을 상담하는 ${category || "운동"} 전문가처럼 말한다. 과장된 광고문이 아니라 자연스러운 존댓말로 쓴다.`,
     "목표는 단순 조회수가 아니라 네이버 플레이스 클릭 증가, 플레이스 체류시간 증가, 전화문의 증가, 방문예약 증가, 회원등록 증가다.",
     "대표키워드 검색 후 블로그를 읽은 사람이 플레이스를 클릭하고 상담이나 방문예약까지 이어지게 작성한다.",
     "",
@@ -1657,7 +1693,7 @@ function buildExpertBlogRules({ businessName, keyword, category, isTreatraum }) 
     "[본문 필수 흐름]",
     "도입부: 고객 검색 의도와 실제 고민을 짚는다.",
     "본문1: 운동 실패 이유를 의지 부족이 아니라 환경, 구조, 루틴 관점으로 설명한다.",
-    "본문2: 대표키워드 선택 기준을 접근성, 시설, 머신, 운동 시스템, 관리 기준으로 설명한다.",
+    "본문2: 대표키워드 선택 기준을 접근성, 시설, 수업·운동 시스템, 강사·관리 기준으로 설명한다.",
     "본문3: 업체 장점은 광고처럼 쓰지 말고 실제 방문한 사람 시점으로 쓴다.",
     "본문4: 시설 사진만 보지 말고 직접 방문, 상담, 무료 체험, 시설 구경, 플레이스 예약으로 이어지게 쓴다.",
     "본문5: 처음 등록 당시, 1개월, 3개월 변화 흐름을 후기처럼 자연스럽게 구성한다.",
@@ -1673,8 +1709,8 @@ function buildExpertBlogRules({ businessName, keyword, category, isTreatraum }) 
     "네이버 블로그에 바로 붙여넣을 수 있는 일반 텍스트로만 작성한다.",
     "마크다운 문법을 절대 쓰지 않는다. 샵(#) 기호로 시작하는 소제목, 별표 강조, 코드블록 같은 형식을 사용하지 않는다.",
     "소제목은 '1. 운동 실패 이유는 의지보다 환경입니다'처럼 일반 문장으로 쓴다.",
-    "본문 중간중간 사진이 필요한 위치에는 빈 줄을 두고 '[사진을 넣어주세요: 헬스장 입구 또는 외관 사진]'처럼 표시한다.",
-    "사진 안내 문구는 본문 안에 최소 5개 넣는다. 외관, 시설 내부, 대표 머신, 상담 공간, 네이버 플레이스 예약 화면을 각각 넣을 위치를 표시한다.",
+    `본문 중간중간 사진이 필요한 위치에는 빈 줄을 두고 '[사진을 넣어주세요: ${category || "매장"} 입구 또는 외관 사진]'처럼 표시한다.`,
+    "사진 안내 문구는 본문 안에 최소 5개 넣는다. 외관, 시설 내부, 대표 시설(머신·기구·수업 공간), 상담 공간, 네이버 플레이스 예약 화면을 각각 넣을 위치를 표시한다.",
     "본문 중간에 짧은 인용구형 강조 문장을 3개 넣는다.",
     "인용구는 “운동을 오래 못 한 이유는 의지가 약해서가 아니라, 나에게 맞는 환경을 아직 못 찾았기 때문일 수 있습니다.”처럼 큰따옴표 문장으로만 쓴다.",
     "인용구에 >, ##, ** 같은 마크다운 기호를 절대 쓰지 않는다.",
@@ -1725,7 +1761,7 @@ function createPrompt({
     buildExpertBlogRules({ businessName, keyword, category, isTreatraum }),
     "",
     isFitnessCategory
-      ? "당신은 네이버 플레이스 SEO 전문가이자 지역 헬스장 마케팅 컨설턴트이다."
+      ? `당신은 네이버 플레이스 SEO 전문가이자 지역 ${category || "피트니스·웰니스"} 마케팅 컨설턴트이다.`
       : `당신은 네이버 플레이스 SEO 전문가이자 지역 ${category || "로컬 비즈니스"} 마케팅 컨설턴트이다.`,
     "",
     "목표는 단순 블로그 조회수가 아니다.",
@@ -1897,9 +1933,9 @@ function cleanBlogDraftForPublishing(rawDraft) {
   if (hasPhotoMarker) return draft;
 
   const photoMarkers = [
-    "[사진을 넣어주세요: 헬스장 입구 또는 외관 사진]",
-    "[사진을 넣어주세요: 시설 내부와 전체 운동 동선 사진]",
-    "[사진을 넣어주세요: 대표 머신 또는 프리미엄 기구 사진]",
+    "[사진을 넣어주세요: 매장(센터) 입구 또는 외관 사진]",
+    "[사진을 넣어주세요: 시설 내부와 전체 공간·동선 사진]",
+    "[사진을 넣어주세요: 대표 시설(머신·기구·수업 공간) 사진]",
     "[사진을 넣어주세요: 상담 공간 또는 무료 체험 안내 사진]",
     "[사진을 넣어주세요: 네이버 플레이스 예약 화면 또는 지도 위치 캡처]"
   ];
@@ -2033,7 +2069,7 @@ async function createOpenAIBlogDraft({
       isTreatraum: normalizeText(businessName).includes(normalizeText("트리트라움"))
     }),
     "",
-    "너는 네이버 플레이스 SEO 전문가이자 지역 헬스장 마케팅 컨설턴트다.",
+    `너는 네이버 플레이스 SEO 전문가이자 지역 ${category || "피트니스·웰니스"} 마케팅 컨설턴트다.`,
     "목표는 단순 블로그 조회수가 아니라 네이버 플레이스 클릭, 체류시간, 전화문의, 방문예약, 회원등록 증가다.",
     "사용자가 네이버 블로그에 바로 붙여넣어 발행할 수 있는 완성 원고를 작성한다.",
     "대표키워드 검색자가 블로그를 읽은 뒤 네이버 플레이스를 클릭하고 상담 또는 방문예약을 하고 싶게 만들어야 한다.",
@@ -2045,13 +2081,13 @@ async function createOpenAIBlogDraft({
     "대표키워드는 본문 안에 8~12회, 업체명은 5회 이상 자연스럽게 넣는다.",
     "소제목은 7개 이상 사용하고, 각 소제목 아래에는 실제 독자가 도움이 된다고 느낄 만큼 구체적인 설명을 넣는다.",
     "왜 운동에 실패하는지, 선택 기준, 업체 장점, 플레이스 방문 유도, 회원 변화 사례, 결론 흐름을 반드시 포함한다.",
-    "시설, 접근성, 머신, 운동 시스템, 관리, 상담, 무료 체험, 시설 구경, 초보자 관점, PT/피티, 운동 루틴, 방문 전 체크, 네이버 지도 확인 흐름을 모두 자연스럽게 포함한다.",
+    "시설, 접근성, 수업·운동 시스템, 관리, 상담, 무료 체험, 시설 구경, 초보자 관점, 운동 루틴, 방문 전 체크, 네이버 지도 확인 흐름을 업종에 맞게 자연스럽게 포함한다.",
     "정보성 70%, 홍보성 30% 비율을 유지한다.",
     "네이버 블로그에 바로 붙여넣을 수 있는 일반 텍스트로만 작성한다.",
     "마크다운 문법을 절대 쓰지 않는다. 샵(#) 기호로 시작하는 소제목, 별표 강조, 코드블록 같은 형식을 사용하지 않는다.",
     "소제목은 '1. 운동 실패 이유는 의지보다 환경입니다'처럼 숫자와 일반 문장으로 쓴다.",
-    "본문 중간중간 사진이 필요한 위치에는 빈 줄을 두고 '[사진을 넣어주세요: 헬스장 입구 또는 외관 사진]'처럼 표시한다.",
-    "사진 안내 문구는 본문 안에 최소 5개 넣는다. 외관, 시설 내부, 대표 머신, 상담 공간, 네이버 플레이스 예약 화면을 각각 넣을 위치를 표시한다.",
+    `본문 중간중간 사진이 필요한 위치에는 빈 줄을 두고 '[사진을 넣어주세요: ${category || "매장"} 입구 또는 외관 사진]'처럼 표시한다.`,
+    "사진 안내 문구는 본문 안에 최소 5개 넣는다. 외관, 시설 내부, 대표 시설(머신·기구·수업 공간), 상담 공간, 네이버 플레이스 예약 화면을 각각 넣을 위치를 표시한다.",
     "본문 중간에 짧은 인용구형 강조 문장을 3개 넣는다.",
     "인용구는 “시설 사진보다 중요한 것은 내가 오래 다닐 수 있는 환경인지 확인하는 것입니다.”처럼 큰따옴표 문장으로만 쓴다.",
     "인용구에 >, ##, ** 같은 마크다운 기호를 절대 쓰지 않는다.",
